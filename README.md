@@ -13,6 +13,8 @@ encoders → CLI → tkinter GUI, fully usable.
 > [与 VB 原版的差异](#与-vb-原版的差异--fixes-vs-original)）。
 > Rebuilt from the VB.NET SANEWinDS original, with several original bugs fixed.
 
+![FEEYEE × SANE](assets/brand-banner.jpg)
+
 ---
 
 ## 目录 / Table of Contents
