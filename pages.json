@@ -1,0 +1,54 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationBarTitleText": "SANE 扫描客户端"
+      }
+    },
+    {
+      "path": "pages/settings/settings",
+      "style": {
+        "navigationBarTitleText": "主机设置"
+      }
+    },
+    {
+      "path": "pages/files/files",
+      "style": {
+        "navigationBarTitleText": "文件管理"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "SANE",
+    "navigationBarBackgroundColor": "#FAF9F6",
+    "backgroundColor": "#FAF9F6"
+  },
+  "tabBar": {
+    "color": "#8A8A8A",
+    "selectedColor": "#0FA3A3",
+    "backgroundColor": "#FFFFFF",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "text": "扫描",
+        "iconPath": "static/tabbar/tab-scan.png",
+        "selectedIconPath": "static/tabbar/tab-scan-active.png"
+      },
+      {
+        "pagePath": "pages/settings/settings",
+        "text": "设置",
+        "iconPath": "static/tabbar/tab-settings.png",
+        "selectedIconPath": "static/tabbar/tab-settings-active.png"
+      },
+      {
+        "pagePath": "pages/files/files",
+        "text": "文件",
+        "iconPath": "static/tabbar/tab-files.png",
+        "selectedIconPath": "static/tabbar/tab-files-active.png"
+      }
+    ]
+  }
+}

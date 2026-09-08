@@ -1,0 +1,116 @@
+/**
+ * SANE 数据结构（由 sanewin/models.py 翻译而来）
+ */
+import { SANE_CONSTRAINT_NONE, SANE_TYPE_INT } from './constants'
+
+export class SANERange {
+	min: Int = 0
+	max: Int = 0
+	quant: Int = 0
+
+	constructor(min: Int = 0, max: Int = 0, quant: Int = 0) {
+		this.min = min
+		this.max = max
+		this.quant = quant
+	}
+}
+
+export class SANEConstraint {
+	constraintType: Int = SANE_CONSTRAINT_NONE
+	stringList: Array<string> = []
+	wordList: Array<Int> = []
+	range: SANERange | null = null
+}
+
+export class SANEOptionDescriptor {
+	index: Int = -1
+	name: string = ''
+	title: string = ''
+	desc: string = ''
+	type: Int = SANE_TYPE_INT
+	unit: Int = 0
+	size: Int = 0
+	cap: Int = 0
+	constraint: SANEConstraint = new SANEConstraint()
+}
+
+export class SANEDevice {
+	name: string = ''
+	vendor: string = ''
+	model: string = ''
+	type: string = ''
+
+	constructor(name: string = '', vendor: string = '', model: string = '', type: string = '') {
+		this.name = name
+		this.vendor = vendor
+		this.model = model
+		this.type = type
+	}
+
+	displayName(): string {
+		if (this.vendor != '' || this.model != '') {
+			const vm: string = (this.vendor + ' ' + this.model).trim()
+			return vm + ' [' + this.name + ']'
+		}
+		return this.name
+	}
+
+	shortName(): string {
+		if (this.model != '') return this.model
+		if (this.vendor != '') return this.vendor
+		return this.name
+	}
+}
+
+export class SANEParameters {
+	format: Int = 0
+	lastFrame: boolean = false
+	bytesPerLine: Int = 0
+	pixelsPerLine: Int = 0
+	lines: Int = 0
+	depth: Int = 0
+
+	override toString(): string {
+		return 'format=' + this.format + ' lines=' + this.lines + ' bpl=' + this.bytesPerLine +
+			' ppl=' + this.pixelsPerLine + ' depth=' + this.depth + ' last=' + this.lastFrame
+	}
+}
+
+/** 一帧图像数据（原始字节） */
+export class SANEImageFrame {
+	params: SANEParameters = new SANEParameters()
+	data: Uint8Array = new Uint8Array(0)
+
+	get isEmpty(): boolean {
+		return this.data.length == 0
+	}
+}
+
+export class SANEControlOptionRequest {
+	handle: Int = 0
+	option: Int = 0
+	action: Int = 0
+	valueType: Int = SANE_TYPE_INT
+	valueSize: Int = 0
+	values: Array<number | string | null> = []
+
+	constructor(handle: Int = 0, option: Int = 0, action: Int = 0,
+		valueType: Int = SANE_TYPE_INT, valueSize: Int = 0,
+		values: Array<number | string | null> = []) {
+		this.handle = handle
+		this.option = option
+		this.action = action
+		this.valueType = valueType
+		this.valueSize = valueSize
+		this.values = values
+	}
+}
+
+export class SANEControlOptionReply {
+	status: Int = 0
+	info: Int = 0
+	valueType: Int = SANE_TYPE_INT
+	valueSize: Int = 0
+	values: Array<number | string | null> = []
+	resource: string = ''
+}

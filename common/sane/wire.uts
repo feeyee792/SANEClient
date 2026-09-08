@@ -1,0 +1,198 @@
+/**
+ * SANE 网络协议序列化层（WireWriter / WireReader）
+ * 由 sanewin/protocol.py 翻译而来：
+ * - word（32 位整数）以网络字节序（big-endian）传输
+ * - 字符串为 word 长度(含终止 null) + UTF-8 字节 + null
+ */
+import { SANE_Word, SANE_Byte, SANE_Char, SANE_String, SANE_Boolean, SANE_TYPE_BUTTON, SANE_TYPE_GROUP, SANE_TYPE_STRING } from './constants'
+import { InputStream } from 'java.io'
+
+// ---------------------------------------------------------------- 通用工具
+
+export function uint8Concat(parts: Array<Uint8Array>): Uint8Array {
+	let total: Int = 0
+	for (let i = 0; i < parts.length; i++) {
+		total += parts[i].length.toInt()
+	}
+	const out = new Uint8Array(total)
+	let offset: Int = 0
+	for (let i = 0; i < parts.length; i++) {
+		out.set(parts[i], offset)
+		offset += parts[i].length.toInt()
+	}
+	return out
+}
+
+// ---------------------------------------------------------------- 写
+
+export class WireWriter {
+	private buf: Array<number> = []
+
+	get length(): Int {
+		return this.buf.length.toInt()
+	}
+
+	writeWord(value: Int): void {
+		const v: Int = value
+		this.buf.push((v >> 24) & 0xFF)
+		this.buf.push((v >> 16) & 0xFF)
+		this.buf.push((v >> 8) & 0xFF)
+		this.buf.push(v & 0xFF)
+	}
+
+	writeByte(value: Int): void {
+		this.buf.push(value & 0xFF)
+	}
+
+	writeChar(ch: string): void {
+		const code = ch.charCodeAt(0)
+		if (code != null) {
+			this.buf.push(code.toInt() & 0xFF)
+		}
+	}
+
+	writeString(value: string): void {
+		const encoder = new TextEncoder()
+		const encoded: Uint8Array = encoder.encode(value)
+		this.writeWord(encoded.length.toInt() + 1) // +1 为终止 null
+		for (let i = 0; i < encoded.length; i++) {
+			this.buf.push(encoded[i].toInt() & 0xFF)
+		}
+		this.buf.push(0)
+	}
+
+	writeBoolean(value: boolean): void {
+		this.writeWord(value ? 1 : 0)
+	}
+
+	write(data: number | string | boolean, dataType: Int): void {
+		switch (dataType) {
+			case SANE_Word:
+				this.writeWord((data as number).toInt())
+				break
+			case SANE_Byte:
+				this.writeByte((data as number).toInt())
+				break
+			case SANE_Char:
+				this.writeChar(data as string)
+				break
+			case SANE_String:
+				this.writeString(data as string)
+				break
+			case SANE_Boolean:
+				this.writeBoolean(data as boolean)
+				break
+			default:
+				throw new Error('Unimplemented Sane_DataType: ' + dataType)
+		}
+	}
+
+	/** 返回 ByteArray（Java byte[]），可直接传给 OutputStream.write */
+	toBytes(): ByteArray {
+		const out = new ByteArray(this.buf.length.toInt())
+		for (let i: Int = 0; i < this.buf.length; i++) {
+			out[i] = this.buf[i].toByte()
+		}
+		return out
+	}
+}
+
+// ---------------------------------------------------------------- 读
+
+export class WireReader {
+	private stream: InputStream | null = null
+	private timeoutMs: Int
+
+	constructor(stream: InputStream, timeoutMs: Int = 30000) {
+		this.stream = stream
+		this.timeoutMs = timeoutMs
+	}
+
+	/** 从流中精确读取 n 字节，服务端提前断开则抛异常。
+	 * Java InputStream.read 需要 byte[]，UTS 中用 ByteArray 中转（Uint8Array 不能直接传）。 */
+	readExact(n: Int): Uint8Array {
+		const s = this.stream
+		if (s == null) {
+			throw new Error('stream closed')
+		}
+		const buf = new ByteArray(n)
+		let got: Int = 0
+		while (got < n) {
+			const r: Int = s.read(buf, got, n - got)
+			if (r < 0) {
+				throw new Error('server sent incomplete data')
+			}
+			got += r
+		}
+		const out = new Uint8Array(n)
+		for (let i: Int = 0; i < n; i++) {
+			// Uint8Array 元素赋值需传 Int/Number（UByte 不适用其 set 签名）
+			out[i] = buf[i].toInt() & 0xFF
+		}
+		return out
+	}
+
+	readWord(): Int {
+		const b = this.readExact(4)
+		const b0: Int = b[0].toInt() & 0xFF
+		const b1: Int = b[1].toInt() & 0xFF
+		const b2: Int = b[2].toInt() & 0xFF
+		const b3: Int = b[3].toInt() & 0xFF
+		return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+	}
+
+	readByte(): Int {
+		const b = this.readExact(1)
+		return b[0].toInt() & 0xFF
+	}
+
+	readChar(): string {
+		const b = this.readExact(1)
+		return String.fromCharCode(b[0].toInt() & 0xFF)
+	}
+
+	readString(): string {
+		const len = this.readWord()
+		if (len < 0) {
+			throw new Error('invalid string length: ' + len)
+		}
+		const raw = this.readExact(len)
+		const decoder = new TextDecoder()
+		let value: string = decoder.decode(raw)
+		if (value.endsWith('\u0000')) {
+			value = value.substring(0, value.length - 1)
+		}
+		return value
+	}
+
+	readBoolean(): boolean {
+		return this.readWord() != 0
+	}
+
+	read(dataType: Int): number | string | boolean {
+		switch (dataType) {
+			case SANE_Word:
+				return this.readWord()
+			case SANE_Byte:
+				return this.readByte()
+			case SANE_Char:
+				return this.readChar()
+			case SANE_String:
+				return this.readString()
+			case SANE_Boolean:
+				return this.readBoolean()
+		}
+		throw new Error('Unimplemented Sane_DataType: ' + dataType)
+	}
+}
+
+/** 对应 VB 的 OptionValueArrayLength */
+export function optionValueArrayLength(optionSize: Int, optionType: Int): Int {
+	if (optionType == SANE_TYPE_BUTTON || optionType == SANE_TYPE_GROUP) {
+		return 0
+	}
+	if (optionType == SANE_TYPE_STRING) {
+		return 1 // 不支持字符串数组
+	}
+	return (optionSize / 4).toInt()
+}

@@ -1,0 +1,776 @@
+/**
+ * SANE 网络协议客户端（由 sanewin/client.py 翻译而来）
+ *
+ * 所有 RPC 过程：Init / GetDevices / Open / Close / Cancel / GetOptionDescriptors /
+ * ControlOption / GetParameters / Start / Authorize / Exit 与图像帧采集。
+ *
+ * 注意：本类方法为同步阻塞 IO，调用方必须放入子线程执行（见 store.uts 的
+ * runOnThreadAsync），不能直接在 UI 线程调用（Android 会抛
+ * NetworkOnMainThreadException）。
+ */
+import { Socket, InetSocketAddress } from 'java.net'
+import { OutputStream } from 'java.io'
+import { MessageDigest } from 'java.security'
+
+import {
+	SANE_NET_INIT,
+	SANE_NET_GET_DEVICES,
+	SANE_NET_OPEN,
+	SANE_NET_CLOSE,
+	SANE_NET_GET_OPTION_DESCRIPTORS,
+	SANE_NET_CONTROL_OPTION,
+	SANE_NET_GET_PARAMETERS,
+	SANE_NET_START,
+	SANE_NET_CANCEL,
+	SANE_NET_AUTHORIZE,
+	SANE_NET_EXIT,
+	SANE_NET_BIG_ENDIAN,
+	SANE_STATUS_GOOD,
+	SANE_STATUS_INVAL,
+	SANE_STATUS_IO_ERROR,
+	SANE_STATUS_ACCESS_DENIED,
+	SANE_TYPE_BOOL,
+	SANE_TYPE_FIXED,
+	SANE_TYPE_INT,
+	SANE_TYPE_STRING,
+	SANE_TYPE_BUTTON,
+	SANE_TYPE_GROUP,
+	SANE_CONSTRAINT_STRING_LIST,
+	SANE_CONSTRAINT_WORD_LIST,
+	SANE_CONSTRAINT_RANGE,
+	SANE_Word,
+	SANE_String,
+	SANE_ACTION_GET_VALUE,
+	SANE_ACTION_SET_VALUE,
+	VERSION_CODE,
+	saneFix,
+	saneUnfix,
+	saneVersionMajor,
+	saneVersionMinor,
+	saneVersionBuild
+} from './constants'
+import {
+	SANEControlOptionReply,
+	SANEControlOptionRequest,
+	SANEConstraint,
+	SANEDevice,
+	SANEImageFrame,
+	SANEOptionDescriptor,
+	SANEParameters,
+	SANERange
+} from './models'
+import { WireReader, WireWriter, optionValueArrayLength, uint8Concat } from './wire'
+
+export const DEFAULT_TCP_TIMEOUT_MS: Int = 30000
+export const DEFAULT_IMAGE_TIMEOUT_S: Int = 120
+export const DEFAULT_IMAGE_PORT_TIMEOUT_MS: Int = 5000
+
+// ---------------------------------------------------------------- 异常
+
+export class SaneError extends Error {
+	status: Int
+
+	constructor(status: Int, message: string = '') {
+		super(message == '' ? 'SANE status ' + status : message)
+		this.status = status
+	}
+}
+
+export class EmptyFrameException extends Error {
+	constructor(message: string = 'empty image frame from SANE server') {
+		super(message)
+	}
+}
+
+export class ServerDisconnectedException extends Error {
+	constructor(message: string) {
+		super(message)
+	}
+}
+
+// ---------------------------------------------------------------- 辅助
+
+function md5Hex(input: Uint8Array): string {
+	const md = MessageDigest.getInstance('MD5')
+	const buf = new ByteArray(input.length.toInt())
+	for (let i: Int = 0; i < input.length.toInt(); i++) {
+		buf[i] = input[i].toByte()
+	}
+	md.update(buf)
+	const d = md.digest()
+	const HEX = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f']
+	let sb = ''
+	for (let i: Int = 0; i < d.size; i++) {
+		const b: Int = d[i].toInt() & 0xFF
+		sb += HEX[(b >> 4) & 0xF] + HEX[b & 0xF]
+	}
+	return sb
+}
+
+// ---------------------------------------------------------------- RPC 参数项
+
+/** RPC 参数项：值 + 数据类型（UTS 不支持数组内元组类型标注，用类代替） */
+export class SaneRpcItem {
+	data: number | string | boolean
+	dataType: Int
+
+	constructor(data: number | string | boolean, dataType: Int) {
+		this.data = data
+		this.dataType = dataType
+	}
+}
+
+/** START 结果 */
+export class SaneStartResult {
+	port: Int = 0
+	byteOrder: Int = 0
+
+	constructor(port: Int, byteOrder: Int) {
+		this.port = port
+		this.byteOrder = byteOrder
+	}
+}
+
+/** findOption 结果 */
+export class SaneFindResult {
+	index: Int = 0
+	descriptor: SANEOptionDescriptor = new SANEOptionDescriptor()
+
+	constructor(index: Int, descriptor: SANEOptionDescriptor) {
+		this.index = index
+		this.descriptor = descriptor
+	}
+}
+
+// ---------------------------------------------------------------- 客户端
+
+export class SaneClient {
+	host: string = ''
+	port: Int = 6566
+	username: string = ''
+	password: string = ''
+	tcpTimeoutMs: Int = DEFAULT_TCP_TIMEOUT_MS
+	imageTimeoutS: Int = DEFAULT_IMAGE_TIMEOUT_S
+
+	private controlSocket: Socket | null = null
+	private controlStream: OutputStream | null = null
+	private reader: WireReader | null = null
+	private progressCallback: ((percent: Int) => void) | null = null
+
+	handle: Int = -1
+	versionCode: Int = VERSION_CODE
+	serverVersionCode: Int = 0
+
+	constructor(host: string, port: Int = 6566, username: string = '', password: string = '',
+		tcpTimeoutMs: Int = DEFAULT_TCP_TIMEOUT_MS, imageTimeoutS: Int = DEFAULT_IMAGE_TIMEOUT_S) {
+		this.host = host
+		this.port = port
+		this.username = username
+		this.password = password
+		this.tcpTimeoutMs = Math.max(tcpTimeoutMs, 5000).toInt()
+		this.imageTimeoutS = imageTimeoutS
+	}
+
+	get connected(): boolean {
+		return this.controlSocket != null
+	}
+
+	// ------------------------------------------------ 连接管理
+
+	connect(): void {
+		if (this.controlSocket != null) {
+			return
+		}
+		const sock = new Socket()
+		sock.connect(new InetSocketAddress(this.host, this.port), this.tcpTimeoutMs)
+		sock.setSoTimeout(this.tcpTimeoutMs)
+		this.controlSocket = sock
+		this.controlStream = sock.getOutputStream()
+		this.reader = new WireReader(sock.getInputStream(), this.tcpTimeoutMs)
+	}
+
+	private requireStream(): OutputStream {
+		const stream = this.controlStream
+		if (stream == null) {
+			throw new Error('not connected')
+		}
+		return stream
+	}
+
+	private request(rpc: Int, items: Array<SaneRpcItem>): WireReader {
+		const writer = new WireWriter()
+		writer.writeWord(rpc)
+		for (let i: Int = 0; i < items.length; i++) {
+			writer.write(items[i].data, items[i].dataType)
+		}
+		this.requireStream().write(writer.toBytes())
+		const r = this.reader
+		if (r == null) {
+			throw new SaneError(SANE_STATUS_IO_ERROR, 'reader is null')
+		}
+		return r
+	}
+
+	private setProgressCallback(cb: ((percent: Int) => void) | null): void {
+		this.progressCallback = cb
+	}
+
+	private emitProgress(percent: Int): void {
+		if (this.progressCallback != null) {
+			this.progressCallback(percent)
+		}
+	}
+
+	// ------------------------------------------------ RPC: INIT
+
+	init(username: string = ''): Int {
+		this.connect()
+		const user: string = username == '' ? this.username : username
+		const reader = this.request(SANE_NET_INIT, [
+			new SaneRpcItem(this.versionCode, SANE_Word),
+			new SaneRpcItem(user, SANE_String)
+		])
+		const status: Int = reader.readWord()
+		this.serverVersionCode = reader.readWord()
+		console.log('client version = ' + saneVersionMajor(this.versionCode) + '.' + saneVersionMinor(this.versionCode) + '.' + saneVersionBuild(this.versionCode) +
+			', server version = ' + saneVersionMajor(this.serverVersionCode) + '.' + saneVersionMinor(this.serverVersionCode) + '.' + saneVersionBuild(this.serverVersionCode))
+		return status
+	}
+
+	// ------------------------------------------------ RPC: GET_DEVICES
+
+	getDevices(): Array<SANEDevice> {
+		const reader = this.request(SANE_NET_GET_DEVICES, [])
+		const status: Int = reader.readWord()
+		if (status != SANE_STATUS_GOOD) {
+			throw new SaneError(status)
+		}
+		const arrayLen: Int = reader.readWord()
+		if (arrayLen < 0) {
+			throw new SaneError(SANE_STATUS_IO_ERROR, 'invalid device array length ' + arrayLen)
+		}
+		const devices: Array<SANEDevice> = []
+		for (let i: Int = 0; i < arrayLen; i++) {
+			const empty: boolean = reader.readBoolean()
+			if (empty) {
+				break
+			}
+			const device = new SANEDevice(
+				reader.readString(),
+				reader.readString(),
+				reader.readString(),
+				reader.readString()
+			)
+			devices.push(device)
+		}
+		return devices
+	}
+
+	// ------------------------------------------------ RPC: OPEN
+
+	open(deviceName: string): Int {
+		const reader = this.request(SANE_NET_OPEN, [
+			new SaneRpcItem(deviceName, SANE_String)
+		])
+		let status: Int = reader.readWord()
+		this.handle = reader.readWord()
+		let resource: string = reader.readString()
+		if (resource != '') {
+			this.authorize(reader, resource)
+			status = reader.readWord()
+			this.handle = reader.readWord()
+			resource = reader.readString()
+		}
+		console.log("opened device '" + deviceName + "', handle=" + this.handle + ', status=' + status)
+		return status
+	}
+
+	close(): void {
+		if (this.handle < 0) {
+			return
+		}
+		try {
+			const reader = this.request(SANE_NET_CLOSE, [
+				new SaneRpcItem(this.handle, SANE_Word)
+			])
+			reader.readWord() // dummy
+		} catch (e: any) {
+			// 忽略断开错误
+		}
+		this.handle = -1
+	}
+
+	cancel(): void {
+		if (this.handle < 0) {
+			return
+		}
+		const reader = this.request(SANE_NET_CANCEL, [
+			new SaneRpcItem(this.handle, SANE_Word)
+		])
+		reader.readWord() // dummy
+	}
+
+	exit(): void {
+		if (this.controlSocket == null) {
+			return
+		}
+		try {
+			const writer = new WireWriter()
+			writer.writeWord(SANE_NET_EXIT)
+			this.requireStream().write(writer.toBytes())
+		} catch (e: any) {
+			// 忽略
+		}
+		this.disconnect()
+	}
+
+	disconnect(): void {
+		const sock = this.controlSocket
+		if (sock != null) {
+			try {
+				sock.close()
+			} catch (e: any) {
+				// 忽略
+			}
+			this.controlSocket = null
+			this.controlStream = null
+			this.reader = null
+		}
+		this.handle = -1
+	}
+
+	// ------------------------------------------------ RPC: GET_OPTION_DESCRIPTORS
+
+	getOptionDescriptors(): Array<SANEOptionDescriptor> {
+		const reader = this.request(SANE_NET_GET_OPTION_DESCRIPTORS, [
+			new SaneRpcItem(this.handle, SANE_Word)
+		])
+		const arrayLen: Int = reader.readWord()
+		if (arrayLen < 0) {
+			throw new SaneError(SANE_STATUS_IO_ERROR, 'invalid descriptor array length ' + arrayLen)
+		}
+		const descriptors: Array<SANEOptionDescriptor> = []
+		for (let i: Int = 0; i < arrayLen; i++) {
+			const empty: boolean = reader.readBoolean()
+			if (empty) {
+				break
+			}
+			const desc = new SANEOptionDescriptor()
+			desc.index = i.toInt()
+			desc.name = reader.readString()
+			desc.title = reader.readString()
+			desc.desc = reader.readString()
+			desc.type = reader.readWord()
+			desc.unit = reader.readWord()
+			desc.size = reader.readWord()
+			desc.cap = reader.readWord()
+			const ctype: Int = reader.readWord()
+			const constraint = new SANEConstraint()
+			constraint.constraintType = ctype
+			if (constraint.constraintType == SANE_CONSTRAINT_STRING_LIST) {
+				const count: Int = reader.readWord()
+				// saned 的计数包含终止空字符串（NULL 项），读取后丢弃
+				for (let j: Int = 0; j < count; j++) {
+					constraint.stringList.push(reader.readString())
+				}
+				if (constraint.stringList.length > 0 && constraint.stringList[constraint.stringList.length - 1] == '') {
+					constraint.stringList.pop()
+				}
+				// 针对 hp3500 后端的修正：size 至少覆盖最长字符串+1
+				if (constraint.stringList.length > 0) {
+					let longest: Int = 0
+					for (let j: Int = 0; j < constraint.stringList.length; j++) {
+						if (constraint.stringList[j].length.toInt() > longest) {
+							longest = constraint.stringList[j].length.toInt()
+						}
+					}
+					desc.size = Math.max(desc.size, longest + 1).toInt()
+				}
+			} else if (constraint.constraintType == SANE_CONSTRAINT_WORD_LIST) {
+				reader.readWord() // 第一个 word 为数量（-1 计数语义）
+				const count: Int = reader.readWord() // 实际发送的是 count-1，这里补回
+				for (let j: Int = 0; j < count; j++) {
+					constraint.wordList.push(reader.readWord())
+				}
+			} else if (constraint.constraintType == SANE_CONSTRAINT_RANGE) {
+				const emptyRange: boolean = reader.readBoolean()
+				if (!emptyRange) {
+					constraint.range = new SANERange(
+						reader.readWord(),
+						reader.readWord(),
+						reader.readWord()
+					)
+				}
+			}
+			desc.constraint = constraint
+			descriptors.push(desc)
+		}
+		return descriptors
+	}
+
+	findOption(name: string): SaneFindResult {
+		const descriptors = this.getOptionDescriptors()
+		for (let i: Int = 0; i < descriptors.length; i++) {
+			if (descriptors[i].name == name) {
+				return new SaneFindResult(i, descriptors[i])
+			}
+		}
+		throw new Error("option '" + name + "' not found")
+	}
+
+	// ------------------------------------------------ RPC: CONTROL_OPTION
+
+	controlOption(request: SANEControlOptionRequest): SANEControlOptionReply {
+		if (request.valueType == SANE_TYPE_GROUP) {
+			const reply = new SANEControlOptionReply()
+			reply.status = SANE_STATUS_INVAL
+			return reply
+		}
+
+		const writer = new WireWriter()
+		writer.writeWord(SANE_NET_CONTROL_OPTION)
+		writer.writeWord(request.handle)
+		writer.writeWord(request.option)
+		writer.writeWord(request.action)
+		writer.writeWord(request.valueType)
+		writer.writeWord(request.valueSize)
+
+		let values: Array<number | string | null> = request.values
+		const arrayLen: Int = optionValueArrayLength(request.valueSize, request.valueType)
+		if (request.valueType == SANE_TYPE_BOOL ||
+			request.valueType == SANE_TYPE_FIXED ||
+			request.valueType == SANE_TYPE_INT) {
+			writer.writeWord(arrayLen)
+			for (let i: Int = 0; i < arrayLen; i++) {
+				const v: number | string | null = i < values.length ? values[i] : null
+				if (request.valueType == SANE_TYPE_BOOL) {
+					writer.writeBoolean(v != null ? (v as number) != 0 : false)
+				} else if (request.valueType == SANE_TYPE_FIXED) {
+					writer.writeWord(saneFix(v != null ? (v as number) : 0.0))
+				} else {
+					writer.writeWord(v != null ? (v as number).toInt() : 0)
+				}
+			}
+		} else if (request.valueType == SANE_TYPE_BUTTON) {
+			writer.writeWord(0)
+		} else if (request.valueType == SANE_TYPE_STRING) {
+			let s: string = ''
+			if (values.length > 0 && values[0] != null) {
+				s = values[0] as string
+			}
+		// 填充到 value_size-1（保留末尾 null 的位置）
+		const pad: Int = (request.valueSize - 1).toInt()
+		if (s.length < pad) {
+			let fill = ''
+			for (let i: Int = 0; i < pad - s.length; i++) {
+				fill += '\u0000'
+				}
+				s = s + fill
+			}
+			writer.writeString(s)
+		}
+
+		this.requireStream().write(writer.toBytes())
+
+		let reply = this.readControlOptionReply()
+		if (reply.resource != '') {
+			const r = this.reader
+			if (r == null) {
+				throw new SaneError(SANE_STATUS_IO_ERROR, 'reader is null')
+			}
+			this.authorize(r, reply.resource)
+			reply = this.readControlOptionReply()
+		}
+		return reply
+	}
+
+	private readControlOptionReply(): SANEControlOptionReply {
+		const r = this.reader
+		if (r == null) {
+			throw new SaneError(SANE_STATUS_IO_ERROR, 'reader is null')
+		}
+		const reply = new SANEControlOptionReply()
+		reply.status = r.readWord()
+		reply.info = r.readWord()
+		reply.valueType = r.readWord()
+		reply.valueSize = r.readWord()
+		this.readReplyValues(reply)
+		reply.resource = r.readString()
+		return reply
+	}
+
+	private readReplyValues(reply: SANEControlOptionReply): void {
+		const r = this.reader
+		if (r == null) {
+			throw new SaneError(SANE_STATUS_IO_ERROR, 'reader is null')
+		}
+		const vt = reply.valueType
+		if (vt == SANE_TYPE_BOOL ||
+			vt == SANE_TYPE_FIXED ||
+			vt == SANE_TYPE_INT) {
+			const arrayLen: Int = r.readWord()
+			for (let i: Int = 0; i < arrayLen; i++) {
+				const word: Int = r.readWord()
+				if (vt == SANE_TYPE_FIXED) {
+					reply.values.push(saneUnfix(word))
+				} else if (vt == SANE_TYPE_BOOL) {
+					reply.values.push(word != 0 ? 1 : 0)
+				} else {
+					reply.values.push(word)
+				}
+			}
+		} else if (vt == SANE_TYPE_BUTTON) {
+			r.readWord() // array_len
+		} else if (vt == SANE_TYPE_STRING) {
+			let s: string = r.readString()
+			// 去掉字符串中的 null 填充
+			s = s.replace(/\u0000/g, '')
+			reply.values.push(s)
+		}
+		// GROUP: 无值
+	}
+
+	// ------------------------------------------------ RPC: GET_PARAMETERS
+
+	getParameters(): SANEParameters {
+		const reader = this.request(SANE_NET_GET_PARAMETERS, [
+			new SaneRpcItem(this.handle, SANE_Word)
+		])
+		const status: Int = reader.readWord()
+		if (status != SANE_STATUS_GOOD) {
+			throw new SaneError(status)
+		}
+		const params = new SANEParameters()
+		params.format = reader.readWord()
+		params.lastFrame = reader.readWord() != 0
+		params.bytesPerLine = reader.readWord()
+		params.pixelsPerLine = reader.readWord()
+		params.lines = reader.readWord()
+		params.depth = reader.readWord()
+		return params
+	}
+
+	// ------------------------------------------------ RPC: START
+
+	start(): SaneStartResult {
+		const reader = this.request(SANE_NET_START, [
+			new SaneRpcItem(this.handle, SANE_Word)
+		])
+		let status: Int = reader.readWord()
+		let port: Int = reader.readWord()
+		let byteOrder: Int = reader.readWord()
+		let resource: string = reader.readString()
+		if (resource != '') {
+			this.authorize(reader, resource)
+			status = reader.readWord()
+			port = reader.readWord()
+			byteOrder = reader.readWord()
+			resource = reader.readString()
+		}
+		if (status != SANE_STATUS_GOOD) {
+			throw new SaneError(status)
+		}
+		console.log('start: data port=' + port + ', byte order=0x' + byteOrder.toString(16))
+		return new SaneStartResult(port, byteOrder)
+	}
+
+	// ------------------------------------------------ RPC: AUTHORIZE
+
+	private authorize(reader: WireReader, resource: string): void {
+		let password: string = this.password == null ? '' : this.password
+		const upper: string = resource.toUpperCase()
+		const md5Marker: string = '$MD5$'
+		if (upper.indexOf(md5Marker) >= 0) {
+			const p: Int = upper.indexOf(md5Marker).toInt()
+			const salt: string = resource.substring(p + md5Marker.length)
+			if (salt.length > 128) {
+				throw new SaneError(SANE_STATUS_ACCESS_DENIED,
+					'the MD5 portion of the resource string is too long')
+			}
+			const encoder = new TextEncoder()
+			const digest: string = md5Hex(encoder.encode(salt + password))
+			password = '$MD5$' + digest
+		}
+
+		const writer = new WireWriter()
+		writer.writeWord(SANE_NET_AUTHORIZE)
+		writer.writeString(resource)
+		writer.writeString(this.username == null ? '' : this.username)
+		writer.writeString(password)
+		this.requireStream().write(writer.toBytes())
+		reader.readWord() // 回复为一个无意义 word
+	}
+
+	// ------------------------------------------------ 图像采集
+
+	acquireFrame(port: Int, byteOrder: Int = SANE_NET_BIG_ENDIAN,
+		timeoutS: Int = 0, progressCallback: ((percent: Int) => void) | null = null): SANEImageFrame {
+		const timeout = timeoutS > 0 ? timeoutS : this.imageTimeoutS
+		const timeoutMs: Int = Math.max(timeout * 1000, DEFAULT_IMAGE_PORT_TIMEOUT_MS).toInt()
+		const sock = this.controlSocket
+		if (sock == null) {
+			throw new Error('not connected')
+		}
+		const inet = sock.getInetAddress()
+		const hostIp: string = inet != null ? inet.getHostAddress() : this.host
+
+		const dataSock = new Socket()
+		dataSock.connect(new InetSocketAddress(hostIp, port), timeoutMs)
+		dataSock.setSoTimeout(timeoutMs)
+		const dataReader = new WireReader(dataSock.getInputStream(), timeoutMs)
+
+		// 必须先连接数据端口再查询参数
+		const params = this.getParameters()
+		console.log('beginning image transfer: ' + params.toString())
+
+		const chunks: Array<Uint8Array> = []
+		let transferred: Int = 0
+		const expectedTotal: Int = params.lines > 0 ? (params.lines * params.bytesPerLine).toInt() : 0
+		let nextProgressAt: Int = 1
+
+		try {
+			while (true) {
+				const lengthRaw = dataReader.readExact(4)
+				const b0: Int = lengthRaw[0].toInt() & 0xFF
+				const b1: Int = lengthRaw[1].toInt() & 0xFF
+				const b2: Int = lengthRaw[2].toInt() & 0xFF
+				const b3: Int = lengthRaw[3].toInt() & 0xFF
+				// 无符号 32 位
+				const datalen: number = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) >>> 0
+				if (datalen == 4294967295) { // 0xFFFFFFFF
+					if (expectedTotal > 0 && transferred < expectedTotal) {
+						console.log('server underran expected byte count (' + transferred + ' < ' + expectedTotal + ')')
+					}
+					if (transferred == 0) {
+						throw new EmptyFrameException()
+					}
+					break
+				}
+				if (expectedTotal > 0 && transferred >= expectedTotal) {
+					console.log('overran: transferred=' + transferred + ' expected=' + expectedTotal +
+						' chunks=' + chunks.length + '; aborting')
+					break
+				}
+				if (datalen >= 32768 + 4096) {
+					console.log('bogus data length field: 0x' + datalen.toString(16) + '; aborting transfer')
+					break
+				}
+				const payload = dataReader.readExact(datalen.toInt())
+				chunks.push(payload)
+				transferred += payload.length.toInt()
+				if (expectedTotal > 0) {
+					// Kotlin Int/Int 是整除，先乘后除（与 Python 浮点除法语义一致）
+					const progress: Int = (transferred * 100 / expectedTotal).toInt()
+					if (progress > nextProgressAt) {
+						this.emitProgress(progress)
+						nextProgressAt = (progress + 10).toInt()
+					}
+				} else if (nextProgressAt == 1) {
+					nextProgressAt = 2
+					this.emitProgress(-1)
+				}
+			}
+		} catch (e: any) {
+			if (e instanceof EmptyFrameException) {
+				throw e
+			}
+			const msgRaw: string | null = e.message
+			const msg: string = msgRaw == null ? '' : msgRaw
+			if (msg.indexOf('timeout') >= 0) {
+				throw new SaneError(SANE_STATUS_IO_ERROR, 'timeout waiting for image data')
+			}
+			throw new ServerDisconnectedException(msg)
+		} finally {
+			try {
+				dataSock.close()
+			} catch (e: any) {
+				// 忽略
+			}
+		}
+
+		if (expectedTotal > 0) {
+			this.emitProgress(100)
+		}
+
+		const data = uint8Concat(chunks)
+		console.log('frame done: dataLen=' + data.length + ' expected=' + expectedTotal +
+			' lines=' + params.lines + ' bpl=' + params.bytesPerLine + ' ppl=' + params.pixelsPerLine)
+		let finalData = data
+		if (expectedTotal > 0 && data.length < expectedTotal) {
+			// 原 VB workaround：不足时补零到期望大小
+			const padded = new Uint8Array(expectedTotal)
+			padded.set(data)
+			finalData = padded
+		}
+
+		const frame = new SANEImageFrame()
+		frame.params = params
+		frame.data = finalData
+		return frame
+	}
+
+	scanAllFrames(port: Int, byteOrder: Int = SANE_NET_BIG_ENDIAN,
+		timeoutS: Int = 0, progressCallback: ((percent: Int) => void) | null = null): Array<SANEImageFrame> {
+		const frames: Array<SANEImageFrame> = []
+		this.setProgressCallback(progressCallback)
+		try {
+			while (true) {
+				let frame: SANEImageFrame
+				try {
+					frame = this.acquireFrame(port, byteOrder, timeoutS)
+				} catch (e: any) {
+					if (e instanceof EmptyFrameException) {
+						break
+					}
+					throw e as Error
+				}
+				frames.push(frame)
+				if (frame.params.lastFrame) {
+					break
+				}
+				if (frame.data.length == 0) {
+					break
+				}
+			}
+		} finally {
+			this.setProgressCallback(null)
+		}
+		return frames
+	}
+
+	// ------------------------------------------------ 便捷方法
+
+	setOption(option: Int, values: Array<number | string | null>): SANEControlOptionReply {
+		const descriptors = this.getOptionDescriptors()
+		if (option < 0 || option >= descriptors.length) {
+			throw new Error('option index out of range: ' + option)
+		}
+		const desc = descriptors[option]
+		const req = new SANEControlOptionRequest(
+			this.handle,
+			option,
+			SANE_ACTION_SET_VALUE,
+			desc.type,
+			desc.size,
+			values
+		)
+		return this.controlOption(req)
+	}
+
+	getOption(option: Int): SANEControlOptionReply {
+		const descriptors = this.getOptionDescriptors()
+		if (option < 0 || option >= descriptors.length) {
+			throw new Error('option index out of range: ' + option)
+		}
+		const desc = descriptors[option]
+		const req = new SANEControlOptionRequest(
+			this.handle,
+			option,
+			SANE_ACTION_GET_VALUE,
+			desc.type,
+			desc.size,
+			[]
+		)
+		return this.controlOption(req)
+	}
+}

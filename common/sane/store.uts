@@ -1,0 +1,506 @@
+/**
+ * 全局状态 + 扫描流程编排（页面与 SaneClient 的桥梁）
+ *
+ * 所有协议操作通过 runOnThreadAsync 放到子线程，UI 线程不阻塞。
+ * 配置持久化用 uni.setStorageSync（键 sane_config）。
+ */
+import { SaneClient, SaneError } from './client'
+import { SANEDevice, SANEImageFrame } from './models'
+import { SANE_CONSTRAINT_RANGE, SANE_CONSTRAINT_STRING_LIST, SANE_CONSTRAINT_WORD_LIST } from './constants'
+import { runOnThreadAsync, runOnMain, runOnThread } from './threadutil'
+import { framesToBitmap, framesToPdfFile, saveBitmapAsPng } from './imageutil'
+import { getScansDir, renderNameTemplate, listScanFiles, ScanFileInfo } from './fileutil'
+import { Bitmap } from 'android.graphics'
+
+export const CONFIG_KEY: string = 'sane_config'
+
+export class ScanOptionsState {
+	modeList: Array<string> = []
+	resolutionList: Array<string> = []
+	paperList: Array<string> = []
+
+	modeIndex: Int = -1
+	resolutionIndex: Int = -1
+	paperIndex: Int = -1
+}
+
+export class Store {
+	// 配置
+	host: string = '192.168.1.230'
+	port: Int = 6566
+	username: string = ''
+	password: string = ''
+	lastDevice: string = ''
+	autoConnect: boolean = true
+	nameTemplate: string = '{date}_{time}'
+
+	// 运行状态
+	client: SaneClient | null = null
+	devices: Array<SANEDevice> = []
+	connected: boolean = false
+	opened: boolean = false
+	options: ScanOptionsState = new ScanOptionsState()
+	scanning: boolean = false
+	progress: Int = -1
+	statusText: string = '未连接'
+	lastPreview: Bitmap | null = null
+	lastPreviewPath: string = ''
+	files: Array<ScanFileInfo> = []
+
+	// 连续扫描会话（手动多页：每页独立 start，最后一页后合成 PDF）
+	sessionFrames: Array<SANEImageFrame> = []
+	sessionByteOrder: Int = 0
+	pageCount: Int = 0
+
+	// 内部缓存（选项索引）
+	private modeOptIdx: Int = -1
+	private resolutionOptIdx: Int = -1
+	private paperOptIdx: Int = -1
+	private brxOptIdx: Int = -1
+	private bryOptIdx: Int = -1
+
+	// ------------------------------------------------ 配置持久化
+
+	loadConfig(): void {
+		try {
+			const raw: string = uni.getStorageSync(CONFIG_KEY) as string
+			if (raw == null || raw == '') {
+				return
+			}
+			const json = JSON.parse(raw)
+			if (json == null) return
+			const obj = json as UTSJSONObject
+			if (obj["host"] != null) this.host = obj["host"] as string
+			if (obj["port"] != null) this.port = (obj["port"] as number).toInt()
+			if (obj["username"] != null) this.username = obj["username"] as string
+			if (obj["password"] != null) this.password = obj["password"] as string
+			if (obj["lastDevice"] != null) this.lastDevice = obj["lastDevice"] as string
+			if (obj["autoConnect"] != null) this.autoConnect = obj["autoConnect"] as boolean
+			if (obj["nameTemplate"] != null) this.nameTemplate = obj["nameTemplate"] as string
+		} catch (e: any) {
+			console.log('load config failed: ' + e.message)
+		}
+	}
+
+	saveConfig(): void {
+		const obj = {
+			host: this.host,
+			port: this.port,
+			username: this.username,
+			password: this.password,
+			lastDevice: this.lastDevice,
+			autoConnect: this.autoConnect,
+			nameTemplate: this.nameTemplate
+		}
+		try {
+			uni.setStorageSync(CONFIG_KEY, JSON.stringify(obj))
+		} catch (e: any) {
+			console.log('save config failed: ' + e.message)
+		}
+	}
+
+	// ------------------------------------------------ 连接
+
+	/** 建立控制连接并 INIT（子线程） */
+	connectAndInit(): Promise<string> {
+		return runOnThreadAsync<string>(() => {
+			const c = new SaneClient(this.host, this.port, this.username, this.password)
+			const status = c.init()
+			if (status != 0) {
+				c.disconnect()
+				throw new SaneError(status, 'SANE init 失败：status=' + status)
+			}
+			this.client = c
+			this.connected = true
+			this.statusText = '已连接 ' + this.host + ':' + this.port
+			return 'ok'
+		})
+	}
+
+	/** 获取设备列表（子线程） */
+	fetchDevices(): Promise<Array<SANEDevice>> {
+		return runOnThreadAsync<Array<SANEDevice>>(() => {
+			const c = this.client
+			if (c == null) {
+				throw new Error('未连接，请先连接')
+			}
+			const devices = c.getDevices()
+			this.devices = devices
+			return devices
+		})
+	}
+
+	/** 打开设备（子线程） */
+	openDevice(name: string): Promise<string> {
+		return runOnThreadAsync<string>(() => {
+			const c = this.client
+			if (c == null) {
+				throw new Error('未连接，请先连接')
+			}
+			const status = c.open(name)
+			if (status != 0) {
+				throw new SaneError(status, '打开设备失败：' + statusNameText(status))
+			}
+			this.lastDevice = name
+			this.opened = true
+			this.saveConfig()
+			return name
+		})
+	}
+
+	/** 连接 + 枚举 + 自动打开上次设备（子线程，供启动/设置页调用） */
+	fullConnect(): Promise<string> {
+		return runOnThreadAsync<string>(() => {
+			this.connectAndInitSync()
+			const c = this.client
+			if (c == null) {
+				throw new Error('连接失败')
+			}
+			const devices = c.getDevices()
+			this.devices = devices
+			let target: string = this.lastDevice
+			if (target == '' && devices.length > 0) {
+				target = devices[0].name
+			}
+			if (target != '') {
+				const status = c.open(target)
+				if (status != 0) {
+					throw new SaneError(status, '打开设备失败：' + statusNameText(status))
+				}
+				this.lastDevice = target
+				this.opened = true
+				this.saveConfig()
+				this.loadOptionLists()
+			}
+			this.connected = true
+			this.statusText = '已连接 ' + this.host + ':' + this.port
+			return target
+		})
+	}
+
+	private connectAndInitSync(): void {
+		const c = new SaneClient(this.host, this.port, this.username, this.password)
+		const status = c.init()
+		if (status != 0) {
+			c.disconnect()
+			throw new SaneError(status, 'SANE init 失败：status=' + status)
+		}
+		this.client = c
+	}
+
+	disconnect(): void {
+		const c = this.client
+		if (c != null) {
+			try {
+				c.exit()
+			} catch (e: any) {
+				// 忽略
+			}
+			this.client = null
+		}
+		this.connected = false
+		this.opened = false
+		this.devices = []
+		this.statusText = '未连接'
+	}
+
+	// ------------------------------------------------ 选项
+
+	/** 根据设备真实约束构建下拉列表（在子线程中调用） */
+	loadOptionLists(): void {
+		const c = this.client
+		if (c == null) {
+			return
+		}
+		const descriptors = c.getOptionDescriptors()
+		const st = new ScanOptionsState()
+		this.modeOptIdx = -1
+		this.resolutionOptIdx = -1
+		this.paperOptIdx = -1
+		this.brxOptIdx = -1
+		this.bryOptIdx = -1
+
+		for (let i: Int = 0; i < descriptors.length; i++) {
+			const d = descriptors[i]
+			if (d.name == 'mode') {
+				this.modeOptIdx = i
+				if (d.constraint.constraintType == SANE_CONSTRAINT_STRING_LIST) {
+					st.modeList = d.constraint.stringList
+				}
+			} else if (d.name == 'resolution') {
+				this.resolutionOptIdx = i
+				if (d.constraint.constraintType == SANE_CONSTRAINT_WORD_LIST) {
+					for (let j: Int = 0; j < d.constraint.wordList.length; j++) {
+						st.resolutionList.push('' + d.constraint.wordList[j])
+					}
+				} else if (d.constraint.constraintType == SANE_CONSTRAINT_RANGE) {
+					const r = d.constraint.range
+					if (r != null) {
+						// RANGE：生成合理步进值
+						const step: Int = r.quant > 0 ? r.quant : 25
+						for (let v: Int = r.min; v <= r.max; v += step) {
+							st.resolutionList.push('' + v)
+						}
+					}
+				}
+			} else if (d.name == 'scan-area') {
+				this.paperOptIdx = i
+				if (d.constraint.constraintType == SANE_CONSTRAINT_STRING_LIST) {
+					st.paperList = d.constraint.stringList
+				}
+			} else if (d.name == 'br-x') {
+				this.brxOptIdx = i
+			} else if (d.name == 'br-y') {
+				this.bryOptIdx = i
+			}
+		}
+
+		// fallback：mode 无约束时给常见值
+		if (st.modeList.length == 0) {
+			st.modeList = ['Color', 'Grayscale']
+		}
+		// fallback：分辨率无约束
+		if (st.resolutionList.length == 0) {
+			st.resolutionList = ['75', '150', '200', '300', '600']
+		}
+		// 纸张：无 scan-area 时用 A4/A5/A6/Letter（经 br-x/br-y 毫米坐标）
+		if (st.paperList.length == 0) {
+			st.paperList = ['A4', 'A5', 'A6', 'Letter']
+		}
+
+		// 默认值：彩色 / 200dpi / A4
+		st.modeIndex = 0
+		for (let j: Int = 0; j < st.modeList.length; j++) {
+			if (st.modeList[j].toLowerCase().indexOf('color') >= 0) {
+				st.modeIndex = j
+				break
+			}
+		}
+		st.resolutionIndex = 0
+		let bestRes: Int = -1
+		for (let j: Int = 0; j < st.resolutionList.length; j++) {
+			const v: Int = parseInt(st.resolutionList[j]).toInt()
+			if (v == 200) {
+				st.resolutionIndex = j
+				bestRes = 200
+				break
+			}
+			if (bestRes < 0 || (Math.abs(v - 200).toInt() < Math.abs(bestRes - 200).toInt())) {
+				bestRes = v
+				st.resolutionIndex = j
+			}
+		}
+		st.paperIndex = 0
+		for (let j: Int = 0; j < st.paperList.length; j++) {
+			if (st.paperList[j].toLowerCase().indexOf('a4') >= 0) {
+				st.paperIndex = j
+				break
+			}
+		}
+
+		this.options = st
+	}
+
+	/** 应用扫描设置（mode/resolution/paper，子线程中调用） */
+	applySettings(mode: string, resolution: string, paper: string): void {
+		const c = this.client
+		if (c == null) {
+			throw new Error('未连接')
+		}
+		if (this.modeOptIdx >= 0) {
+			const reply = c.setOption(this.modeOptIdx, [mode])
+			if (reply.status != 0) {
+				throw new SaneError(reply.status, '设置模式失败')
+			}
+		}
+		if (this.resolutionOptIdx >= 0) {
+			const res: Int = parseInt(resolution).toInt()
+			const reply = c.setOption(this.resolutionOptIdx, [res])
+			if (reply.status != 0) {
+				throw new SaneError(reply.status, '设置分辨率失败')
+			}
+		}
+		if (this.paperOptIdx >= 0) {
+			const reply = c.setOption(this.paperOptIdx, [paper])
+			if (reply.status != 0) {
+				throw new SaneError(reply.status, '设置纸张失败')
+			}
+		} else if (this.brxOptIdx >= 0 && this.bryOptIdx >= 0) {
+			// 无 scan-area 的后端：用 br-x/br-y 毫米坐标
+			let w: Int = 210
+			let h: Int = 297
+			const pl = paper.toLowerCase()
+			if (pl.indexOf('letter') >= 0) {
+				w = 216
+				h = 279
+			} else if (pl.indexOf('a6') >= 0) {
+				w = 105
+				h = 148
+			} else if (pl.indexOf('a5') >= 0) {
+				w = 148
+				h = 210
+			}
+			const r1 = c.setOption(this.brxOptIdx, [w])
+			if (r1.status != 0) {
+				throw new SaneError(r1.status, '设置宽度失败')
+			}
+			const r2 = c.setOption(this.bryOptIdx, [h])
+			if (r2.status != 0) {
+				throw new SaneError(r2.status, '设置高度失败')
+			}
+		}
+	}
+
+	// ------------------------------------------------ 扫描（手动多页）
+
+	/** 扫描一页：start → 采集帧，累积到 sessionFrames（子线程）。返回当前已扫页数 */
+	scanOnePage(mode: string, resolution: string, paper: string,
+		onProgress: (p: Int) => void): Promise<Int> {
+		if (this.scanning) {
+			throw new Error('扫描进行中')
+		}
+		this.scanning = true
+		this.progress = 0
+		return runOnThreadAsync<Int>(() => {
+			try {
+				const c = this.client
+				if (c == null) {
+					throw new Error('未连接')
+				}
+				// 确保设备已打开
+				if (!this.opened) {
+					if (this.lastDevice != '') {
+						const s = c.open(this.lastDevice)
+						if (s != 0) throw new SaneError(s, '打开设备失败：' + statusNameText(s))
+						this.opened = true
+						this.loadOptionLists()
+					} else if (this.devices.length > 0) {
+						const s = c.open(this.devices[0].name)
+						if (s != 0) throw new SaneError(s, '打开设备失败：' + statusNameText(s))
+						this.lastDevice = this.devices[0].name
+						this.opened = true
+						this.saveConfig()
+						this.loadOptionLists()
+					} else {
+						throw new Error('没有可用设备，请先在设置页连接')
+					}
+				}
+
+				this.applySettings(mode, resolution, paper)
+
+				const startResult = c.start()
+				const port: Int = startResult.port
+				const byteOrder: Int = startResult.byteOrder
+
+				const frames: Array<SANEImageFrame> = c.scanAllFrames(port, byteOrder, 0,
+					(p: Int) => {
+						runOnMain(() => {
+							this.progress = p
+							onProgress(p)
+						})
+					})
+
+				if (frames.length == 0) {
+					throw new Error('扫描未返回图像数据')
+				}
+
+				// 累积本页帧到会话
+				for (let i = 0; i < frames.length; i++) {
+					this.sessionFrames.push(frames[i])
+				}
+				this.sessionByteOrder = byteOrder
+				this.pageCount = this.sessionFrames.length.toInt()
+				return this.pageCount
+			} finally {
+				runOnMain(() => {
+					this.scanning = false
+				})
+			}
+		})
+	}
+
+	/** 结束会话并保存：未勾选连续 → PNG（首页）；勾选连续 → PDF（全部页）。清空会话（子线程） */
+	finishScan(multiPage: boolean, mode: string, resolution: string): Promise<string> {
+		return runOnThreadAsync<string>(() => {
+			const frames = this.sessionFrames
+			if (frames.length == 0) {
+				throw new Error('没有可保存的扫描页')
+			}
+			const dir: string = getScansDir()
+			const modeText: string = mode
+			let resultPath: string = ''
+			const flipped: boolean = this.sessionByteOrder == 0x4321
+			if (!multiPage) {
+				// 未勾选连续扫描：PNG（首页）
+				const name: string = renderNameTemplate(this.nameTemplate, modeText, resolution, 0) + '.png'
+				resultPath = dir + '/' + name
+				console.log('rendering bitmap: frames=' + frames.length)
+				const bmp = framesToBitmap([frames[0]], flipped)
+				console.log('bitmap ok: ' + bmp.getWidth() + 'x' + bmp.getHeight())
+				saveBitmapAsPng(bmp, resultPath)
+				console.log('png saved: ' + resultPath)
+				runOnMain(() => {
+					this.lastPreview = bmp
+					this.lastPreviewPath = resultPath
+				})
+			} else {
+				// 勾选连续扫描：PDF（一页也出单页 PDF，多页则全部页）
+				const name: string = renderNameTemplate(this.nameTemplate, modeText, resolution, frames.length.toInt()) + '.pdf'
+				resultPath = dir + '/' + name
+				console.log('pdf saved: pages=' + frames.length)
+				framesToPdfFile(frames, resultPath, flipped)
+				const first = framesToBitmap([frames[0]], flipped)
+				runOnMain(() => {
+					this.lastPreview = first
+					this.lastPreviewPath = resultPath
+				})
+			}
+			// 刷新文件列表
+			runOnMain(() => {
+				this.files = listScanFiles()
+			})
+			this.sessionFrames = []
+			this.sessionByteOrder = 0
+			this.pageCount = 0
+			return resultPath
+		})
+	}
+
+	cancelScan(): void {
+		const c = this.client
+		if (c != null && this.opened) {
+			runOnThread(() => {
+				try {
+					c.cancel()
+				} catch (e: any) {
+					// 忽略
+				}
+			})
+		}
+	}
+
+	refreshFiles(): void {
+		this.files = listScanFiles()
+	}
+}
+
+function statusNameText(status: Int): string {
+	switch (status) {
+		case 0: return '成功'
+		case 1: return '不支持'
+		case 2: return '已取消'
+		case 3: return '设备忙'
+		case 4: return '无效参数'
+		case 5: return 'EOF'
+		case 6: return '卡纸'
+		case 7: return '无文档'
+		case 8: return '盖板打开'
+		case 9: return 'IO 错误'
+		case 10: return '内存不足'
+		case 11: return '拒绝访问'
+	}
+	return '未知(' + status + ')'
+}
+
+/** 全局单例 */
+export const store = new Store()

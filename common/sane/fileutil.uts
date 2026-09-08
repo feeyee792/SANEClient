@@ -1,0 +1,123 @@
+/**
+ * 文件管理：扫描结果保存目录、文件列表、命名规则模板
+ */
+export const SCAN_SUBDIR: string = 'sane_scans'
+
+/** 应用私有目录下的扫描结果目录（unifile:// 协议路径，FileSystemManager 管理） */
+export function getScansDir(): string {
+	const base: string = uni.env.USER_DATA_PATH
+	const dir = base + '/' + SCAN_SUBDIR
+	const fs = uni.getFileSystemManager()
+	try {
+		fs.accessSync(dir)
+	} catch (e) {
+		// 目录不存在，创建
+		fs.mkdirSync(dir, true)
+	}
+	return dir
+}
+
+export class ScanFileInfo {
+	name: string = ''
+	path: string = ''
+	size: number = 0
+	isPdf: boolean = false
+	timeText: string = ''
+	timeStamp: Long = 0
+
+	constructor(name: string = '', path: string = '', size: number = 0, isPdf: boolean = false, timeText: string = '', timeStamp: Long = 0) {
+		this.name = name
+		this.path = path
+		this.size = size
+		this.isPdf = isPdf
+		this.timeText = timeText
+		this.timeStamp = timeStamp
+	}
+}
+
+function formatSize(size: number): string {
+	if (size < 1024) return size.toInt() + ' B'
+	if (size < 1024 * 1024) return (size / 1024.0).toFixed(1) + ' KB'
+	return (size / (1024.0 * 1024.0)).toFixed(2) + ' MB'
+}
+
+/** 列出扫描目录下全部文件（按修改时间倒序） */
+export function listScanFiles(): Array<ScanFileInfo> {
+	const out: Array<ScanFileInfo> = []
+	const dirPath = getScansDir()
+	const fs = uni.getFileSystemManager()
+	let names: string[] | null = null
+	try {
+		names = fs.readdirSync(dirPath)
+	} catch (e) {
+		return out
+	}
+	if (names == null) {
+		return out
+	}
+	for (let i: Int = 0; i < names.length; i++) {
+		const name: string = names[i]
+		const lower: string = name.toLowerCase()
+		if (!lower.endsWith('.png') && !lower.endsWith('.pdf') && !lower.endsWith('.bmp') && !lower.endsWith('.jpg')) {
+			continue
+		}
+		const info = new ScanFileInfo()
+		info.name = name
+		info.path = dirPath + '/' + name
+		info.isPdf = lower.endsWith('.pdf')
+		try {
+			const st = fs.statSync(info.path, false)
+			if (st.length > 0) {
+				info.size = st[0].stats.size
+				info.timeStamp = st[0].stats.lastModifiedTime.toLong()
+			}
+		} catch (e) {
+			// stat 失败则使用默认值
+		}
+		info.timeText = formatSize(info.size)
+		out.push(info)
+	}
+	// 按修改时间倒序（新的在前）
+	out.sort((a: ScanFileInfo, b: ScanFileInfo) => {
+		if (a.timeStamp > b.timeStamp) return -1
+		if (a.timeStamp < b.timeStamp) return 1
+		return 0
+	})
+	return out
+}
+
+function pad2(n: Int): string {
+	if (n < 10) return '0' + n
+	return '' + n
+}
+
+/** 当前时间戳文本，如 20260908_013733 */
+export function nowStamp(): string {
+	const d = new Date()
+	return '' + d.getFullYear() + pad2((d.getMonth() + 1).toInt()) + pad2(d.getDate().toInt()) +
+		'_' + pad2(d.getHours().toInt()) + pad2(d.getMinutes().toInt()) + pad2(d.getSeconds().toInt())
+}
+
+/** 渲染命名模板：{date}{time}{mode}{resolution}{page} 等占位符 */
+export function renderNameTemplate(template: string, mode: string, resolution: string, pageIndex: Int): string {
+	let s: string = template
+	if (s == '') {
+		s = '{date}_{time}'
+	}
+	const d = new Date()
+	const dateText: string = '' + d.getFullYear() + pad2((d.getMonth() + 1).toInt()) + pad2(d.getDate().toInt())
+	const timeText: string = pad2(d.getHours().toInt()) + pad2(d.getMinutes().toInt()) + pad2(d.getSeconds().toInt())
+	const pageText: string = pageIndex > 0 ? '_p' + pad2(pageIndex) : ''
+
+	s = s.replace('{date}', dateText)
+	s = s.replace('{time}', timeText)
+	s = s.replace('{mode}', mode)
+	s = s.replace('{resolution}', resolution)
+	s = s.replace('{page}', pageText)
+
+	// 清理不允许的字符
+	s = s.replace(/[\\/:*?"<>|]/g, '_')
+	return s
+}
+
+export { formatSize }

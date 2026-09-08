@@ -1,0 +1,297 @@
+<template>
+	<view class="page">
+		<view class="header">
+			<text class="header-title">文件管理</text>
+			<text class="header-count">{{files.length}} 个文件</text>
+		</view>
+
+		<!-- 文件列表 -->
+		<scroll-view class="file-list" scroll-y="true">
+			<view v-if="files.length == 0" class="empty">
+				<text class="empty-title">还没有扫描文件</text>
+				<text class="empty-sub">去扫描页扫一张试试吧</text>
+			</view>
+			<view v-for="(item, index) in files" :key="item.name" class="file-card" @click="onFileClick(index)">
+				<image v-if="!item.isPdf" class="thumb" :src="item.path" mode="aspectFill"></image>
+				<view v-else class="thumb pdf-thumb">
+					<text class="pdf-text">PDF</text>
+				</view>
+				<view class="file-info">
+					<text class="file-name">{{item.name}}</text>
+					<text class="file-size">{{item.timeText}}</text>
+				</view>
+				<text class="file-tag">{{item.isPdf ? 'PDF' : '图片'}}</text>
+			</view>
+		</scroll-view>
+
+		<!-- 预览弹层 -->
+		<view v-if="showPreview" class="preview-mask" @click="closePreview">
+			<view class="preview-box" @click.stop>
+				<image v-if="!previewItem.isPdf" class="preview-img" :src="previewItem.path" mode="aspectFit" @click="openSystem"></image>
+				<view v-else class="preview-pdf" @click="openSystem">
+					<text class="preview-pdf-text">PDF 文件（共 {{previewItem.name}}）</text>
+					<text class="preview-pdf-sub">点击调用系统查看器打开</text>
+				</view>
+				<text class="preview-name">{{previewItem.name}}</text>
+				<view class="preview-actions">
+					<button class="preview-btn" @click="openSystem">{{previewItem.isPdf ? '系统打开' : '放大查看'}}</button>
+					<button class="preview-btn" @click="closePreview">关闭</button>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script lang="uts">
+	import { store } from '../../common/sane/store'
+	import { ScanFileInfo } from '../../common/sane/fileutil'
+
+	export default {
+		data() {
+			return {
+				files: [] as Array<ScanFileInfo>,
+				showPreview: false,
+				previewItem: new ScanFileInfo()
+			}
+		},
+		onShow() {
+			store.refreshFiles()
+			this.files = store.files
+		},
+		methods: {
+			onFileClick(index: number): void {
+				if (index >= 0 && index < this.files.length) {
+					this.previewItem = this.files[index]
+					this.showPreview = true
+				}
+			},
+			closePreview(): void {
+				this.showPreview = false
+			},
+			openSystem(): void {
+				const p = this.previewItem
+				if (p.path == '') {
+					return
+				}
+				if (p.isPdf) {
+					uni.openDocument({
+						filePath: p.path,
+						fileType: 'pdf',
+						fail: (err: any | null) => {
+							uni.showToast({ title: '系统打开失败', icon: 'none' })
+						}
+					})
+				} else {
+					uni.previewImage({
+						urls: [p.path],
+						current: 0,
+						fail: (err: any | null) => {
+							uni.showToast({ title: '预览失败', icon: 'none' })
+						}
+					})
+				}
+			},
+			openSystem(): void {
+				const p = this.previewItem
+				if (p.path == '') {
+					return
+				}
+				if (p.isPdf) {
+					uni.openDocument({
+						filePath: p.path,
+						fileType: 'pdf',
+						fail: (err: any | null) => {
+							uni.showToast({ title: '系统打开失败', icon: 'none' })
+						}
+					})
+				} else {
+					uni.previewImage({
+						urls: [p.path],
+						current: 0,
+						fail: (err: any | null) => {
+							uni.showToast({ title: '预览失败', icon: 'none' })
+						}
+					})
+				}
+			}
+		}
+	}
+</script>
+
+<style>
+	.page {
+		background-color: #FAF9F6;
+		height: 100%;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.header {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding: 24rpx 30rpx;
+	}
+
+	.header-title {
+		font-size: 34rpx;
+		font-weight: bold;
+		color: #2B2B2B;
+	}
+
+	.header-count {
+		font-size: 24rpx;
+		color: #8A8A8A;
+	}
+
+	.file-list {
+		flex: 1;
+		padding: 0 30rpx;
+	}
+
+	.empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		margin-top: 200rpx;
+	}
+
+	.empty-title {
+		font-size: 32rpx;
+		color: #8A8A8A;
+	}
+
+	.empty-sub {
+		font-size: 24rpx;
+		color: #BDBDBD;
+		margin-top: 12rpx;
+	}
+
+	.file-card {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		background-color: #FFFFFF;
+		border-radius: 12px;
+		padding: 20rpx;
+		margin-bottom: 20rpx;
+	}
+
+	.thumb {
+		width: 120rpx;
+		height: 120rpx;
+		border-radius: 8px;
+		background-color: #F0F0F0;
+	}
+
+	.pdf-thumb {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background-color: #FDECEA;
+	}
+
+	.pdf-text {
+		font-size: 26rpx;
+		font-weight: bold;
+		color: #C0392B;
+	}
+
+	.file-info {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		margin-left: 20rpx;
+	}
+
+	.file-name {
+		font-size: 28rpx;
+		color: #2B2B2B;
+	}
+
+	.file-size {
+		font-size: 24rpx;
+		color: #8A8A8A;
+		margin-top: 8rpx;
+	}
+
+	.file-tag {
+		font-size: 22rpx;
+		color: #0FA3A3;
+		background-color: #E8F5F5;
+		padding: 6rpx 16rpx;
+		border-radius: 20rpx;
+		margin-left: 12rpx;
+	}
+
+	.preview-mask {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(0, 0, 0, 0.7);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 100;
+	}
+
+	.preview-box {
+		width: 85%;
+		background-color: #FFFFFF;
+		border-radius: 16px;
+		padding: 30rpx;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+
+	.preview-img {
+		width: 100%;
+		height: 800rpx;
+	}
+
+	.preview-pdf {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding: 100rpx 0;
+	}
+
+	.preview-pdf-text {
+		font-size: 28rpx;
+		color: #2B2B2B;
+	}
+
+	.preview-pdf-sub {
+		font-size: 24rpx;
+		color: #8A8A8A;
+		margin-top: 16rpx;
+	}
+
+	.preview-name {
+		font-size: 26rpx;
+		color: #8A8A8A;
+		margin-top: 20rpx;
+	}
+
+	.preview-actions {
+		margin-top: 24rpx;
+		width: 100%;
+		display: flex;
+		flex-direction: row;
+	}
+
+	.preview-btn {
+		flex: 1;
+		margin-left: 10rpx;
+		margin-right: 10rpx;
+		background-color: #0FA3A3;
+		color: #FFFFFF;
+		font-size: 30rpx;
+		border-radius: 10px;
+		border-width: 0;
+	}
+</style>

@@ -1,0 +1,47 @@
+/**
+ * 线程辅助：阻塞 IO 放子线程、结果回主线程更新 UI
+ */
+import { Thread, Runnable } from 'java.lang'
+import { Handler, Looper } from 'android.os'
+
+class TaskRunnable implements Runnable {
+	private task: () => void
+
+	constructor(task: () => void) {
+		this.task = task
+	}
+
+	override run(): void {
+		this.task()
+	}
+}
+
+/** 在子线程执行任务（不阻塞 UI） */
+export function runOnThread(task: () => void): void {
+	const t = new Thread(new TaskRunnable(task))
+	t.start()
+}
+
+/** 在主线程执行任务（用于更新 UI） */
+export function runOnMain(task: () => void): void {
+	const handler = new Handler(Looper.getMainLooper())
+	handler.post(new TaskRunnable(task))
+}
+
+/** 子线程执行同步任务，结果经 Promise 回到调用方（主线程） */
+export function runOnThreadAsync<T>(task: () => T): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		runOnThread(() => {
+			try {
+				const r: T = task()
+				runOnMain(() => {
+					resolve(r)
+				})
+			} catch (e: any) {
+				runOnMain(() => {
+					reject(e)
+				})
+			}
+		})
+	})
+}

@@ -1,0 +1,185 @@
+/**
+ * SANE 网络协议常量与枚举（由 sanewin/constants.py 翻译而来，uni-app x / UTS 版）
+ *
+ * 注意：UTS 的 enum 类型不能与 Int 互转（传给 Int 参数会编译报错），
+ * 因此全部枚举统一声明为 const Int 常量。
+ */
+
+// 布尔值
+export const SANE_FALSE: Int = 0
+export const SANE_TRUE: Int = 1
+
+// 版本
+export const SANE_CURRENT_MAJOR: Int = 1
+export const SANE_CURRENT_MINOR: Int = 0
+export const SANE_CURRENT_BUILD: Int = 3
+
+export const SANE_MAX_USERNAME_LEN: Int = 128
+export const SANE_MAX_PASSWORD_LEN: Int = 128
+export const SANE_FIXED_SCALE_SHIFT: Int = 16
+
+/** SANE_VERSION_CODE: 打包为 32 位版本码 */
+export function saneVersionCode(major: Int, minor: Int, build: Int): Int {
+	return ((major & 0xFF) << 24) | ((minor & 0xFF) << 16) | (build & 0xFFFF)
+}
+
+export function saneVersionMajor(code: Int): Int {
+	return (code >> 24) & 0xFF
+}
+
+export function saneVersionMinor(code: Int): Int {
+	return (code >> 16) & 0xFF
+}
+
+export function saneVersionBuild(code: Int): Int {
+	return code & 0xFFFF
+}
+
+export const VERSION_CODE: Int = 16777219 // saneVersionCode(1, 0, 3)
+
+/** SANE_FIX: double -> SANE_FIXED（定点数，16 位小数），溢出钳制 */
+export function saneFix(value: number): Int {
+	const scaled: number = value * 65536.0
+	if (scaled > 2147483647.0) return 2147483647
+	if (scaled < -2147483648.0) return -2147483648
+	return scaled.toInt()
+}
+
+/** SANE_UNFIX: SANE_FIXED -> double，保留 4 位小数 */
+export function saneUnfix(word: Int): number {
+	const v: number = word / 65536.0
+	return Math.round(v * 10000.0) / 10000.0
+}
+
+// 选项能力
+export const SANE_CAP_SOFT_SELECT: Int = 1 << 0
+export const SANE_CAP_HARD_SELECT: Int = 1 << 1
+export const SANE_CAP_SOFT_DETECT: Int = 1 << 2
+export const SANE_CAP_EMULATED: Int = 1 << 3
+export const SANE_CAP_AUTOMATIC: Int = 1 << 4
+export const SANE_CAP_INACTIVE: Int = 1 << 5
+export const SANE_CAP_ADVANCED: Int = 1 << 6
+
+export function saneOptionIsActive(cap: Int): boolean {
+	return (cap & SANE_CAP_INACTIVE) == 0
+}
+
+export function saneOptionIsReadable(cap: Int): boolean {
+	if (!saneOptionIsActive(cap)) return false
+	if ((cap & SANE_CAP_HARD_SELECT) != 0 && (cap & SANE_CAP_SOFT_DETECT) == 0) return false
+	return true
+}
+
+export function saneOptionIsSettable(cap: Int): boolean {
+	return (cap & SANE_CAP_SOFT_SELECT) != 0
+}
+
+// 信息位
+export const SANE_INFO_INEXACT: Int = 1 << 0
+export const SANE_INFO_RELOAD_OPTIONS: Int = 1 << 1
+export const SANE_INFO_RELOAD_PARAMS: Int = 1 << 2
+
+// ---------------------------------------------------------------- 常量（原 enum 展开）
+
+// 约束类型（原 SANEConstraintType）
+export const SANE_CONSTRAINT_NONE: Int = 0
+export const SANE_CONSTRAINT_RANGE: Int = 1
+export const SANE_CONSTRAINT_WORD_LIST: Int = 2
+export const SANE_CONSTRAINT_STRING_LIST: Int = 3
+
+// 动作（原 SANEAction）
+export const SANE_ACTION_GET_VALUE: Int = 0
+export const SANE_ACTION_SET_VALUE: Int = 1
+export const SANE_ACTION_SET_AUTO: Int = 2
+
+// 帧格式（原 SANEFrame）
+export const SANE_FRAME_GRAY: Int = 0
+export const SANE_FRAME_RGB: Int = 1
+export const SANE_FRAME_RED: Int = 2
+export const SANE_FRAME_GREEN: Int = 3
+export const SANE_FRAME_BLUE: Int = 4
+
+// 状态（原 SANEStatus）
+export const SANE_STATUS_GOOD: Int = 0
+export const SANE_STATUS_UNSUPPORTED: Int = 1
+export const SANE_STATUS_CANCELLED: Int = 2
+export const SANE_STATUS_DEVICE_BUSY: Int = 3
+export const SANE_STATUS_INVAL: Int = 4
+export const SANE_STATUS_EOF: Int = 5
+export const SANE_STATUS_JAMMED: Int = 6
+export const SANE_STATUS_NO_DOCS: Int = 7
+export const SANE_STATUS_COVER_OPEN: Int = 8
+export const SANE_STATUS_IO_ERROR: Int = 9
+export const SANE_STATUS_NO_MEM: Int = 10
+export const SANE_STATUS_ACCESS_DENIED: Int = 11
+
+export function statusName(status: Int): string {
+	switch (status) {
+		case 0: return 'GOOD'
+		case 1: return 'UNSUPPORTED'
+		case 2: return 'CANCELLED'
+		case 3: return 'DEVICE_BUSY'
+		case 4: return 'INVAL'
+		case 5: return 'EOF'
+		case 6: return 'JAMMED'
+		case 7: return 'NO_DOCS'
+		case 8: return 'COVER_OPEN'
+		case 9: return 'IO_ERROR'
+		case 10: return 'NO_MEM'
+		case 11: return 'ACCESS_DENIED'
+	}
+	return 'UNKNOWN(' + status + ')'
+}
+
+// 值类型（原 SANEValueType）
+export const SANE_TYPE_BOOL: Int = 0
+export const SANE_TYPE_INT: Int = 1
+export const SANE_TYPE_FIXED: Int = 2
+export const SANE_TYPE_STRING: Int = 3
+export const SANE_TYPE_BUTTON: Int = 4
+export const SANE_TYPE_GROUP: Int = 5
+
+// 单位（原 SANEUnit）
+export const SANE_UNIT_NONE: Int = 0
+export const SANE_UNIT_PIXEL: Int = 1
+export const SANE_UNIT_BIT: Int = 2
+export const SANE_UNIT_MM: Int = 3
+export const SANE_UNIT_DPI: Int = 4
+export const SANE_UNIT_PERCENT: Int = 5
+export const SANE_UNIT_MICROSECOND: Int = 6
+
+// 网络过程号（原 SANENetProcedureNumber）
+export const SANE_NET_INIT: Int = 0
+export const SANE_NET_GET_DEVICES: Int = 1
+export const SANE_NET_OPEN: Int = 2
+export const SANE_NET_CLOSE: Int = 3
+export const SANE_NET_GET_OPTION_DESCRIPTORS: Int = 4
+export const SANE_NET_CONTROL_OPTION: Int = 5
+export const SANE_NET_GET_PARAMETERS: Int = 6
+export const SANE_NET_START: Int = 7
+export const SANE_NET_CANCEL: Int = 8
+export const SANE_NET_AUTHORIZE: Int = 9
+export const SANE_NET_EXIT: Int = 10
+
+// 字节序（原 SANENetByteOrder）
+export const SANE_NET_LITTLE_ENDIAN: Int = 0x1234
+export const SANE_NET_BIG_ENDIAN: Int = 0x4321
+
+// 数据类型（原 SaneDataType）
+export const SANE_Word: Int = 0
+export const SANE_Byte: Int = 1
+export const SANE_Char: Int = 2
+export const SANE_String: Int = 3
+export const SANE_Boolean: Int = 4
+
+/** 帧格式名称 */
+export function frameName(frame: Int): string {
+	switch (frame) {
+		case 0: return 'gray'
+		case 1: return 'rgb'
+		case 2: return 'red'
+		case 3: return 'green'
+		case 4: return 'blue'
+	}
+	return 'unknown'
+}

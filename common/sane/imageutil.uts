@@ -1,0 +1,239 @@
+/**
+ * SANE 原始帧 → Bitmap / PNG / PDF（由 sanewin/images.py 的图像语义翻译而来，
+ * 编码层改用 Android 原生 Bitmap / PdfDocument，无第三方依赖）
+ */
+import { Bitmap } from 'android.graphics'
+import { PdfDocument } from 'android.graphics.pdf'
+import { ByteArrayOutputStream } from 'java.io'
+import { Base64 } from 'android.util'
+import { Arrays } from 'java.util'
+
+import { SANE_FRAME_GRAY, SANE_FRAME_RGB, SANE_FRAME_RED, SANE_FRAME_GREEN, SANE_FRAME_BLUE } from './constants'
+import { SANEImageFrame, SANEParameters } from './models'
+
+/** 把 SANE 帧转成 Android Bitmap（ARGB_8888）。16-bit 取高字节。 */
+export function frameToBitmap(frame: SANEImageFrame, bigEndian: boolean = true): Bitmap {
+	const params = frame.params
+	const fmt: Int = params.format
+	const depth: Int = params.depth
+	const width: Int = params.pixelsPerLine
+	let lines: Int = params.lines
+	let stride: Int = params.bytesPerLine
+	const data = frame.data
+
+	if (lines <= 0) {
+		if (stride > 0) {
+			lines = (data.length / stride).toInt()
+		} else {
+			throw new Error('cannot determine image height')
+		}
+	}
+	if (width <= 0 || lines <= 0) {
+		throw new Error('invalid image dimensions: ' + width + 'x' + lines)
+	}
+	if (stride <= 0) {
+		stride = width
+	}
+
+	const hiIdx: Int = bigEndian ? 0 : 1 // 16-bit 样本取高字节的位置
+	// UTS 的 IntArray（与 ByteArray 同族），可直接传给 Bitmap.setPixels
+	const pixels = new IntArray(width * lines)
+	let pi: Int = 0
+
+	if (fmt == SANE_FRAME_GRAY) {
+		if (depth == 1) {
+			// 1-bit：逐位展开，1=黑(0)，0=白(255)
+			const rowBytes: Int = ((width + 7) / 8).toInt()
+			for (let r: Int = 0; r < lines; r++) {
+				const offset: Int = r * stride
+				for (let x: Int = 0; x < width; x++) {
+					const byteIdx: Int = (offset + x / 8).toInt()
+					const bit: Int = 7 - (x % 8)
+					const on: boolean = (data[byteIdx].toInt() & (1 << bit)) != 0
+					const g: Int = on ? 0 : 255
+					pixels[pi] = (0xFF << 24) | (g << 16) | (g << 8) | g
+					pi++
+				}
+			}
+		} else if (depth == 8) {
+			for (let r: Int = 0; r < lines; r++) {
+				const offset: Int = r * stride
+				for (let x: Int = 0; x < width; x++) {
+					const g: Int = data[offset + x].toInt() & 0xFF
+					pixels[pi] = (0xFF << 24) | (g << 16) | (g << 8) | g
+					pi++
+				}
+			}
+		} else if (depth == 16) {
+			for (let r: Int = 0; r < lines; r++) {
+				const offset: Int = r * stride
+				for (let x: Int = 0; x < width; x++) {
+					const g: Int = data[offset + x * 2 + hiIdx].toInt() & 0xFF
+					pixels[pi] = (0xFF << 24) | (g << 16) | (g << 8) | g
+					pi++
+				}
+			}
+		} else {
+			throw new Error('unsupported gray depth: ' + depth)
+		}
+	} else if (fmt == SANE_FRAME_RGB) {
+		if (depth == 8) {
+			for (let r: Int = 0; r < lines; r++) {
+				const offset: Int = r * stride
+				for (let x: Int = 0; x < width; x++) {
+					const o: Int = offset + x * 3
+					const R: Int = data[o].toInt() & 0xFF
+					const G: Int = data[o + 1].toInt() & 0xFF
+					const B: Int = data[o + 2].toInt() & 0xFF
+					pixels[pi] = (0xFF << 24) | (R << 16) | (G << 8) | B
+					pi++
+				}
+			}
+		} else if (depth == 16) {
+			for (let r: Int = 0; r < lines; r++) {
+				const offset: Int = r * stride
+				for (let x: Int = 0; x < width; x++) {
+					const o: Int = offset + x * 6
+					const R: Int = data[o + hiIdx].toInt() & 0xFF
+					const G: Int = data[o + 2 + hiIdx].toInt() & 0xFF
+					const B: Int = data[o + 4 + hiIdx].toInt() & 0xFF
+					pixels[pi] = (0xFF << 24) | (R << 16) | (G << 8) | B
+					pi++
+				}
+			}
+		} else {
+			throw new Error('unsupported rgb depth: ' + depth)
+		}
+	} else if (fmt == SANE_FRAME_RED || fmt == SANE_FRAME_GREEN || fmt == SANE_FRAME_BLUE) {
+		throw new Error('single-band frames must be combined first')
+	} else {
+		throw new Error('unsupported frame format: ' + fmt)
+	}
+
+	const bmp = Bitmap.createBitmap(width, lines, Bitmap.Config.ARGB_8888)
+	bmp.setPixels(pixels, 0, width, 0, 0, width, lines)
+	return bmp
+}
+
+/** 分离的 R/G/B 三帧合并为 RGB 帧 */
+export function combineFrames(frames: Array<SANEImageFrame>): SANEImageFrame {
+	if (frames.length == 0) {
+		throw new Error('no frames to combine')
+	}
+	if (frames.length == 1) {
+		return frames[0]
+	}
+
+	let red: Uint8Array | null = null
+	let green: Uint8Array | null = null
+	let blue: Uint8Array | null = null
+	for (let i: Int = 0; i < frames.length; i++) {
+		const f = frames[i]
+		if (f.params.format == SANE_FRAME_RED) red = f.data
+		else if (f.params.format == SANE_FRAME_GREEN) green = f.data
+		else if (f.params.format == SANE_FRAME_BLUE) blue = f.data
+	}
+	if (red == null || green == null || blue == null) {
+		throw new Error('one or more frames is missing from the image data')
+	}
+
+	const base = frames[0].params
+	const sampleBytes: Int = base.depth == 16 ? 2 : 1
+	const sampleCount: Int = (Math.min(red.length, Math.min(green.length, blue.length)) / sampleBytes).toInt()
+
+	const out = new Uint8Array(sampleCount * sampleBytes * 3)
+	for (let i: Int = 0; i < sampleCount; i++) {
+		const s: Int = i * sampleBytes
+		out.set(red.subarray(s, s + sampleBytes), i * sampleBytes * 3)
+		out.set(green.subarray(s, s + sampleBytes), i * sampleBytes * 3 + sampleBytes)
+		out.set(blue.subarray(s, s + sampleBytes), i * sampleBytes * 3 + sampleBytes * 2)
+	}
+
+	const merged = new SANEImageFrame()
+	const p = new SANEParameters()
+	p.format = SANE_FRAME_RGB
+	p.lastFrame = true
+	p.lines = base.lines
+	p.pixelsPerLine = base.pixelsPerLine
+	p.bytesPerLine = base.bytesPerLine * 3
+	p.depth = base.depth
+	merged.params = p
+	merged.data = out
+	return merged
+}
+
+/** 多帧 → 单张 Bitmap（多页时只取第一页；多通道时合并） */
+export function framesToBitmap(frames: Array<SANEImageFrame>, bigEndian: boolean = true): Bitmap {
+	if (frames.length == 0) {
+		throw new Error('no frames')
+	}
+	const combined = combineFrames(frames)
+	return frameToBitmap(combined, bigEndian)
+}
+
+/** 分块写入二进制文件（unifile:// 协议路径，FileSystemManager）。
+ * 每块 512KB 独立 base64 后写入/追加，避免单次超大字符串导致的内存峰值与写入限制。 */
+export function writeBytesToFile(path: string, bytes: ByteArray): void {
+	const fs = uni.getFileSystemManager()
+	const CHUNK: Int = 524288
+	const total: Int = bytes.size
+	let offset: Int = 0
+	let first: boolean = true
+	while (offset < total) {
+		const end: Int = (offset + CHUNK) < total ? (offset + CHUNK) : total
+		const chunk: ByteArray = Arrays.copyOfRange(bytes, offset, end)
+		const b64: string = Base64.encodeToString(chunk, Base64.NO_WRAP)
+		if (first) {
+			fs.writeFileSync(path, b64, 'base64')
+			first = false
+		} else {
+			fs.appendFileSync(path, b64, 'base64')
+		}
+		offset = end
+	}
+}
+
+/** 保存 Bitmap 为 PNG 文件（unifile:// 协议路径，走 FileSystemManager + 分块 base64） */
+export function saveBitmapAsPng(bmp: Bitmap, path: string): void {
+	const baos = new ByteArrayOutputStream()
+	bmp.compress(Bitmap.CompressFormat.PNG, 100, baos)
+	const bytes: ByteArray = baos.toByteArray()
+	baos.close()
+	writeBytesToFile(path, bytes)
+}
+
+/** 多帧 → PDF 文件（Android PdfDocument，每帧一页） */
+export function framesToPdfFile(frames: Array<SANEImageFrame>, path: string, bigEndian: boolean = true): void {
+	if (frames.length == 0) {
+		throw new Error('no frames')
+	}
+	const fmts = new Set<Int>()
+	for (let i: Int = 0; i < frames.length; i++) {
+		fmts.add(frames[i].params.format)
+	}
+	let pages: Array<SANEImageFrame> = frames
+	if (fmts.has(SANE_FRAME_RED) && fmts.has(SANE_FRAME_GREEN) && fmts.has(SANE_FRAME_BLUE)) {
+		pages = [combineFrames(frames)]
+	}
+
+	const doc = new PdfDocument()
+	try {
+		for (let i: Int = 0; i < pages.length; i++) {
+			const bmp = frameToBitmap(pages[i], bigEndian)
+			const w: Int = bmp.getWidth()
+			const h: Int = bmp.getHeight()
+			const pageInfo = new PdfDocument.PageInfo.Builder(w, h, i + 1).create()
+			const page = doc.startPage(pageInfo)
+			const canvas = page.getCanvas()
+			canvas.drawBitmap(bmp, 0.0.toFloat(), 0.0.toFloat(), null)
+			doc.finishPage(page)
+		}
+		const baos = new ByteArrayOutputStream()
+		doc.writeTo(baos)
+		const bytes: ByteArray = baos.toByteArray()
+		baos.close()
+		writeBytesToFile(path, bytes)
+	} finally {
+		doc.close()
+	}
+}

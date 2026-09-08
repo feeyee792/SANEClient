@@ -1,0 +1,460 @@
+<template>
+	<view class="page">
+		<!-- 顶部：设备 + 连接状态 -->
+		<view class="topbar">
+			<view class="device-info">
+				<text class="device-name">{{deviceName}}</text>
+				<text class="status-text">{{statusText}}</text>
+			</view>
+			<view class="conn-dot" :class="connected ? 'dot-on' : 'dot-off'"></view>
+		</view>
+
+		<!-- 预览区 -->
+		<view class="preview">
+			<image v-if="previewPath != ''" class="preview-img" :src="previewPath" mode="aspectFit"></image>
+			<view v-else class="preview-empty">
+				<text class="empty-title">扫描预览区</text>
+				<text class="empty-sub">连接设备后点击下方按钮开始扫描</text>
+			</view>
+		</view>
+
+		<!-- 设置条：模式 / 纸张 / 分辨率 -->
+		<view class="settings-bar">
+			<picker class="picker" :range="modeList" :value="modeIndex" @change="onModeChange">
+				<view class="picker-item">
+					<text class="picker-label">模式</text>
+					<text class="picker-value">{{modeList.length > 0 ? modeList[modeIndex] : '未连接'}}</text>
+					<text class="arrow">▾</text>
+				</view>
+			</picker>
+			<picker class="picker" :range="paperList" :value="paperIndex" @change="onPaperChange">
+				<view class="picker-item">
+					<text class="picker-label">纸张</text>
+					<text class="picker-value">{{paperList.length > 0 ? paperList[paperIndex] : '未连接'}}</text>
+					<text class="arrow">▾</text>
+				</view>
+			</picker>
+			<picker class="picker" :range="resolutionList" :value="resolutionIndex" @change="onResChange">
+				<view class="picker-item">
+					<text class="picker-label">分辨率</text>
+					<text class="picker-value">{{resolutionList.length > 0 ? resolutionList[resolutionIndex] : '未连接'}}dpi</text>
+					<text class="arrow">▾</text>
+				</view>
+			</picker>
+		</view>
+
+		<!-- 连续扫描 -->
+		<view class="multipage-row">
+			<text class="multipage-label">连续扫描 (PDF)</text>
+			<switch :checked="multiPage" color="#0FA3A3" @change="onMultiChange" />
+		</view>
+
+		<!-- 进度条 -->
+		<view v-if="scanning" class="progress-area">
+			<progress class="progress" :percent="progressPercent" :stroke-width="4" activeColor="#0FA3A3" backgroundColor="#E5E5E5" />
+			<text class="progress-text">{{progressText}}</text>
+		</view>
+
+		<!-- 底部按钮区 -->
+		<view class="bottom-bar">
+			<button v-if="scanning" class="cancel-btn" @click="onCancel">取消</button>
+			<button :class="(scanning || !connected) ? 'scan-btn scan-btn-disabled' : 'scan-btn'" :disabled="scanning || !connected" @click="onScan">{{scanBtnText}}</button>
+		</view>
+	</view>
+</template>
+
+<script lang="uts">
+	import { store } from '../../common/sane/store'
+
+	export default {
+		data() {
+			return {
+				deviceName: '未选择设备',
+				statusText: '未连接',
+				connected: false,
+				previewPath: '',
+				modeList: ['Color', 'Grayscale'] as Array<string>,
+				modeIndex: 0,
+				paperList: ['A4', 'A5', 'A6', 'Letter'] as Array<string>,
+				paperIndex: 0,
+				resolutionList: ['75', '150', '200', '300', '600'] as Array<string>,
+				resolutionIndex: 0,
+				multiPage: false,
+				scanning: false,
+				progress: 0
+			}
+		},
+		computed: {
+			progressPercent(): number {
+				if (this.progress < 0) return 0
+				return this.progress
+			},
+			progressText(): string {
+				if (this.progress < 0) return '正在扫描…'
+				if (this.progress >= 100) return '正在保存…'
+				return '正在扫描… ' + this.progress + '%'
+			},
+			scanBtnText(): string {
+				return this.scanning ? '扫描中…' : '扫 描'
+			}
+		},
+		onLoad() {
+			store.loadConfig()
+			this.syncStore()
+			// 启动自动连接：开关开启且配置过设备时，连接 + 枚举 + 打开上次设备
+			if (store.autoConnect && !store.connected && store.lastDevice != '') {
+				uni.showLoading({ title: '自动连接…', mask: false })
+				store.fullConnect().then((name: string) => {
+					uni.hideLoading()
+					this.syncStore()
+					uni.showToast({ title: '已连接 ' + name, icon: 'success' })
+				}).catch((err: any | null) => {
+					uni.hideLoading()
+					let emsg: string = ''
+					if (err != null) {
+						const m: string | null = (err as Error).message
+						if (m != null && m != '') {
+							emsg = m
+						}
+					}
+					uni.showToast({ title: '自动连接失败：' + emsg, icon: 'none', duration: 3000 })
+				})
+			}
+		},
+		onShow() {
+			this.syncStore()
+			if (this.connected) {
+				store.refreshFiles()
+			}
+		},
+		methods: {
+			syncStore(): void {
+				this.connected = store.connected
+				this.statusText = store.statusText
+				this.deviceName = store.lastDevice == '' ? '未选择设备' : store.lastDevice
+				if (store.options.modeList.length > 0) {
+					this.modeList = store.options.modeList
+					this.modeIndex = store.options.modeIndex
+				}
+				if (store.options.paperList.length > 0) {
+					this.paperList = store.options.paperList
+					this.paperIndex = store.options.paperIndex
+				}
+				if (store.options.resolutionList.length > 0) {
+					this.resolutionList = store.options.resolutionList
+					this.resolutionIndex = store.options.resolutionIndex
+				}
+				if (store.lastPreviewPath != '' && this.previewPath != store.lastPreviewPath && !store.lastPreviewPath.endsWith('.pdf')) {
+					this.previewPath = store.lastPreviewPath
+				}
+			},
+			onModeChange(e: UniPickerChangeEvent): void {
+				const idx: number = e.detail.value as number
+				if (idx >= 0 && idx < this.modeList.length) {
+					this.modeIndex = idx
+				}
+			},
+			onPaperChange(e: UniPickerChangeEvent): void {
+				const idx: number = e.detail.value as number
+				if (idx >= 0 && idx < this.paperList.length) {
+					this.paperIndex = idx
+				}
+			},
+			onResChange(e: UniPickerChangeEvent): void {
+				const idx: number = e.detail.value as number
+				if (idx >= 0 && idx < this.resolutionList.length) {
+					this.resolutionIndex = idx
+				}
+			},
+			onMultiChange(e: UniSwitchChangeEvent): void {
+				this.multiPage = e.detail.value
+			},
+			onCancel(): void {
+				store.cancelScan()
+				store.sessionFrames = []
+				store.pageCount = 0
+				this.scanning = false
+			},
+			async onScan(): Promise<void> {
+				if (this.scanning || !this.connected) {
+					uni.showToast({ title: '请先在设置页连接设备', icon: 'none' })
+					return
+				}
+				if (this.modeList.length == 0) {
+					uni.showToast({ title: '设备选项未加载，请重连', icon: 'none' })
+					return
+				}
+				this.scanning = true
+				this.progress = 0
+				const mode = this.modeList[this.modeIndex]
+				const paper = this.paperList[this.paperIndex]
+				const res = this.resolutionList[this.resolutionIndex]
+				uni.showLoading({ title: '正在扫描第 ' + (store.pageCount + 1) + ' 页…', mask: true })
+				try {
+					await store.scanOnePage(mode, res, paper,
+						(p: Int) => {
+							this.progress = p
+						})
+					uni.hideLoading()
+					if (!this.multiPage) {
+						// 未勾选连续扫描：单页直接保存 PNG
+						const path = await store.finishScan(false, mode, res)
+						this.previewPath = path
+						this.scanning = false
+						this.progress = 100
+						uni.showToast({ title: '扫描完成', icon: 'success' })
+					} else {
+						// 连续扫描：询问是否扫描下一张（放好纸后确认）
+						this.askNextPage(mode, res)
+					}
+				} catch (e: any) {
+					uni.hideLoading()
+					console.log('scan failed: ' + e.toString())
+					let msg: string = '扫描失败'
+					if (e != null) {
+						const m: string | null = e.message
+						if (m != null && m != '') {
+							msg = m
+						}
+					}
+					uni.showToast({ title: msg, icon: 'none', duration: 3000 })
+					this.scanning = false
+					this.progress = 100
+				}
+			},
+			askNextPage(mode: string, res: string): void {
+				this.progress = 100
+				uni.showModal({
+					title: '连续扫描',
+					content: '已扫描 ' + store.pageCount + ' 页，请放入下一页纸张，是否继续扫描？',
+					confirmText: '继续扫描',
+					cancelText: '完成并保存',
+					success: (r) => {
+						if (r.confirm) {
+							// 解锁页面扫描态，允许开始下一页
+							this.scanning = false
+							this.progress = 0
+							this.onScan()
+						} else {
+							this.finishMultiScan(mode, res)
+						}
+					},
+					fail: (err) => {
+						this.finishMultiScan(mode, res)
+					}
+				})
+			},
+			finishMultiScan(mode: string, res: string): void {
+				uni.showLoading({ title: '正在生成 PDF…', mask: true })
+				store.finishScan(true, mode, res).then((path: string) => {
+					uni.hideLoading()
+					this.previewPath = path
+					this.scanning = false
+					this.progress = 100
+					uni.showToast({ title: '已存为 PDF', icon: 'success' })
+				}).catch((err: any | null) => {
+					uni.hideLoading()
+					this.scanning = false
+					let msg: string = '保存失败'
+					if (err != null) {
+						const m: string | null = (err as Error).message
+						if (m != null && m != '') {
+							msg = m
+						}
+					}
+					uni.showToast({ title: msg, icon: 'none', duration: 3000 })
+				})
+			}
+		}
+	}
+</script>
+
+<style>
+	.page {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		background-color: #FAF9F6;
+	}
+
+	.topbar {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding: 20rpx 30rpx;
+		background-color: #FFFFFF;
+		border-bottom-width: 1px;
+		border-bottom-color: #EEEEEE;
+	}
+
+	.device-info {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.device-name {
+		font-size: 30rpx;
+		font-weight: bold;
+		color: #2B2B2B;
+	}
+
+	.status-text {
+		font-size: 24rpx;
+		color: #8A8A8A;
+		margin-top: 4rpx;
+	}
+
+	.conn-dot {
+		width: 20rpx;
+		height: 20rpx;
+		border-radius: 10rpx;
+	}
+
+	.dot-on {
+		background-color: #2ECC71;
+	}
+
+	.dot-off {
+		background-color: #C0C0C0;
+	}
+
+	.preview {
+		flex: 1;
+		margin: 20rpx 30rpx;
+		background-color: #FFFFFF;
+		border-radius: 12px;
+		overflow: hidden;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.preview-img {
+		width: 100%;
+		height: 100%;
+	}
+
+	.preview-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+
+	.empty-title {
+		font-size: 32rpx;
+		color: #8A8A8A;
+	}
+
+	.empty-sub {
+		font-size: 24rpx;
+		color: #BDBDBD;
+		margin-top: 12rpx;
+	}
+
+	.settings-bar {
+		display: flex;
+		flex-direction: row;
+		justify-content: space-between;
+		padding: 0 30rpx 10rpx 30rpx;
+	}
+
+	.picker {
+		flex: 1;
+		margin-right: 16rpx;
+	}
+
+	.picker-item {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		background-color: #FFFFFF;
+		border-radius: 10px;
+		padding: 16rpx 20rpx;
+		border-width: 1px;
+		border-color: #E5E5E5;
+	}
+
+	.picker-label {
+		font-size: 24rpx;
+		color: #8A8A8A;
+		margin-right: 8rpx;
+	}
+
+	.picker-value {
+		font-size: 26rpx;
+		color: #2B2B2B;
+		flex: 1;
+	}
+
+	.arrow {
+		font-size: 22rpx;
+		color: #0FA3A3;
+	}
+
+	.multipage-row {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding: 10rpx 30rpx 20rpx 30rpx;
+	}
+
+	.multipage-label {
+		font-size: 26rpx;
+		color: #2B2B2B;
+	}
+
+	.progress-area {
+		padding: 0 30rpx 20rpx 30rpx;
+	}
+
+	.progress {
+		width: 100%;
+	}
+
+	.progress-text {
+		font-size: 24rpx;
+		color: #8A8A8A;
+		margin-top: 8rpx;
+		text-align: center;
+	}
+
+	.bottom-bar {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: center;
+		padding: 20rpx 30rpx 40rpx 30rpx;
+	}
+
+	.scan-btn {
+		width: 420rpx;
+		height: 100rpx;
+		line-height: 100rpx;
+		background-color: #0FA3A3;
+		color: #FFFFFF;
+		font-size: 36rpx;
+		font-weight: bold;
+		border-radius: 50px;
+		border-width: 0;
+	}
+
+	.scan-btn-disabled {
+		background-color: #A8D5D5;
+		color: #FFFFFF;
+	}
+
+	.cancel-btn {
+		width: 180rpx;
+		height: 100rpx;
+		line-height: 100rpx;
+		margin-right: 30rpx;
+		background-color: #F0F0F0;
+		color: #C0392B;
+		font-size: 30rpx;
+		border-radius: 50px;
+		border-width: 0;
+	}
+</style>

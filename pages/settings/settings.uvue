@@ -1,0 +1,328 @@
+<template>
+	<view class="page">
+		<!-- 主机设置 -->
+		<view class="section">
+			<text class="section-title">主机设置</text>
+
+			<view class="field">
+				<text class="field-label">主机</text>
+				<input class="field-input" v-model="host" placeholder="192.168.1.230" />
+			</view>
+			<view class="field">
+				<text class="field-label">端口</text>
+				<input class="field-input" v-model="port" type="number" placeholder="6566" />
+			</view>
+			<view class="field">
+				<text class="field-label">用户名</text>
+				<input class="field-input" v-model="username" placeholder="（可选）" />
+			</view>
+			<view class="field">
+				<text class="field-label">密码</text>
+				<input class="field-input" v-model="password" password="true" placeholder="（可选）" />
+			</view>
+		</view>
+
+		<!-- 设备 -->
+		<view class="section">
+			<text class="section-title">设备</text>
+			<picker class="device-picker" :range="deviceNames" :value="deviceIndex" @change="onDeviceChange" :disabled="!connected">
+				<view class="device-picker-item">
+					<text class="field-label">选择设备</text>
+					<text class="device-value">{{deviceNames.length > 0 ? deviceNames[deviceIndex] : '未连接'}}</text>
+					<text class="arrow">▾</text>
+				</view>
+			</picker>
+
+			<view class="field">
+				<text class="field-label">当前设备状态</text>
+				<view class="status-right">
+					<text class="status-text">{{connected ? '已连接' : '未连接'}}</text>
+					<view class="conn-dot" :class="connected ? 'dot-on' : 'dot-off'"></view>
+				</view>
+			</view>
+			<view class="field">
+				<text class="field-label">启动时自动连接</text>
+				<switch :checked="autoConnect" color="#0FA3A3" @change="onAutoChange" />
+			</view>
+		</view>
+
+		<!-- 命名规则 -->
+		<view class="section">
+			<text class="section-title">命名规则</text>
+			<view class="field">
+				<text class="field-label">文件名模板</text>
+				<input class="field-input" v-model="nameTemplate" placeholder="{date}_{time}" />
+			</view>
+			<view class="hint">
+				<text class="hint-text">可用占位符：{date} {time} {mode} {resolution} {page}</text>
+			</view>
+		</view>
+
+		<!-- 按钮 -->
+		<view class="btn-area">
+			<button class="btn-secondary" @click="onSave">保存</button>
+			<button class="btn-primary" :loading="connecting" @click="onConnect">{{connected ? '重新连接' : '连接'}}</button>
+		</view>
+	</view>
+</template>
+
+<script lang="uts">
+	import { store } from '../../common/sane/store'
+
+	export default {
+		data() {
+			return {
+				host: '',
+				port: '6566',
+				username: '',
+				password: '',
+				autoConnect: true,
+				nameTemplate: '{date}_{time}',
+				deviceNames: [] as Array<string>,
+				deviceIndex: 0,
+				connected: false,
+				connecting: false
+			}
+		},
+		onLoad() {
+			store.loadConfig()
+			this.syncStore()
+		},
+		onShow() {
+			this.syncStore()
+		},
+		methods: {
+			syncStore(): void {
+				this.host = store.host
+				this.port = '' + store.port
+				this.username = store.username
+				this.password = store.password
+				this.autoConnect = store.autoConnect
+				this.nameTemplate = store.nameTemplate
+				this.connected = store.connected
+				this.syncDevices()
+			},
+			syncDevices(): void {
+				const names: Array<string> = []
+				for (let i = 0; i < store.devices.length; i++) {
+					names.push(store.devices[i].displayName())
+				}
+				this.deviceNames = names
+				if (names.length > 0) {
+					let idx: number = 0
+					for (let i = 0; i < store.devices.length; i++) {
+						if (store.devices[i].name == store.lastDevice) {
+							idx = i
+							break
+						}
+					}
+					this.deviceIndex = idx
+				}
+			},
+			applyInputs(): void {
+				store.host = this.host
+				store.port = parseInt(this.port).toInt()
+				if (store.port <= 0 || store.port > 65535) {
+					store.port = 6566
+				}
+				store.username = this.username
+				store.password = this.password
+				store.autoConnect = this.autoConnect
+				store.nameTemplate = this.nameTemplate
+			},
+			onAutoChange(e: UniSwitchChangeEvent): void {
+				this.autoConnect = e.detail.value
+			},
+			onDeviceChange(e: UniPickerChangeEvent): void {
+				const idx: number = e.detail.value as number
+				if (idx >= 0 && idx < store.devices.length) {
+					this.deviceIndex = idx
+					const name: string = store.devices[idx].name
+					uni.showLoading({ title: '打开设备…', mask: true })
+					store.openDevice(name).then(() => {
+						uni.hideLoading()
+						store.saveConfig()
+						uni.showToast({ title: '设备已切换', icon: 'success' })
+					}).catch((err: any | null) => {
+						uni.hideLoading()
+						let emsg: string = ''
+						if (err != null) {
+							const m: string | null = (err as Error).message
+							if (m != null && m != '') {
+								emsg = m
+							}
+						}
+						uni.showToast({ title: '打开设备失败：' + emsg, icon: 'none', duration: 3000 })
+					})
+				}
+			},
+			async onConnect(): Promise<void> {
+				if (this.connecting) {
+					return
+				}
+				this.applyInputs()
+				store.saveConfig()
+				this.connecting = true
+				uni.showLoading({ title: '正在连接…', mask: true })
+				try {
+					await store.fullConnect()
+					uni.hideLoading()
+					this.connected = true
+					this.syncDevices()
+					if (store.devices.length > 0) {
+						uni.showToast({ title: '已连接，发现 ' + store.devices.length + ' 台设备', icon: 'success' })
+					} else {
+						uni.showToast({ title: '已连接，但未发现设备', icon: 'none' })
+					}
+				} catch (e: any) {
+					uni.hideLoading()
+					this.connected = false
+					let msg: string = '连接失败'
+					if (e != null) {
+						const m: string | null = e.message
+						if (m != null && m != '') {
+							msg = m
+						}
+					}
+					uni.showToast({ title: msg, icon: 'none', duration: 3000 })
+				}
+				this.connecting = false
+			},
+			onSave(): void {
+				this.applyInputs()
+				store.saveConfig()
+				uni.showToast({ title: '设置已保存', icon: 'success' })
+			}
+		}
+	}
+</script>
+
+<style>
+	.page {
+		background-color: #FAF9F6;
+		height: 100%;
+		padding-bottom: 60rpx;
+	}
+
+	.section {
+		background-color: #FFFFFF;
+		margin: 20rpx 30rpx;
+		border-radius: 12px;
+		padding: 24rpx;
+	}
+
+	.section-title {
+		font-size: 28rpx;
+		font-weight: bold;
+		color: #0FA3A3;
+		margin-bottom: 16rpx;
+	}
+
+	.field {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+		padding: 20rpx 0;
+		border-bottom-width: 1px;
+		border-bottom-color: #F0F0F0;
+	}
+
+	.field-label {
+		font-size: 28rpx;
+		color: #2B2B2B;
+		width: 220rpx;
+	}
+
+	.field-input {
+		flex: 1;
+		font-size: 28rpx;
+		color: #2B2B2B;
+		text-align: right;
+	}
+
+	.device-picker {
+		padding: 20rpx 0;
+	}
+
+	.device-picker-item {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.device-value {
+		flex: 1;
+		font-size: 26rpx;
+		color: #2B2B2B;
+		text-align: right;
+		margin-right: 8rpx;
+	}
+
+	.arrow {
+		font-size: 22rpx;
+		color: #0FA3A3;
+	}
+
+	.status-right {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.status-text {
+		font-size: 26rpx;
+		color: #2B2B2B;
+		margin-right: 12rpx;
+	}
+
+	.conn-dot {
+		width: 18rpx;
+		height: 18rpx;
+		border-radius: 9rpx;
+	}
+
+	.dot-on {
+		background-color: #2ECC71;
+	}
+
+	.dot-off {
+		background-color: #C0C0C0;
+	}
+
+	.hint {
+		padding-top: 12rpx;
+	}
+
+	.hint-text {
+		font-size: 22rpx;
+		color: #8A8A8A;
+	}
+
+	.btn-area {
+		display: flex;
+		flex-direction: row;
+		justify-content: space-between;
+		margin: 30rpx;
+	}
+
+	.btn-primary {
+		flex: 1;
+		margin-left: 20rpx;
+		background-color: #0FA3A3;
+		color: #FFFFFF;
+		font-size: 30rpx;
+		border-radius: 10px;
+		border-width: 0;
+	}
+
+	.btn-secondary {
+		flex: 1;
+		background-color: #F0F0F0;
+		color: #2B2B2B;
+		font-size: 30rpx;
+		border-radius: 10px;
+		border-width: 0;
+	}
+</style>
