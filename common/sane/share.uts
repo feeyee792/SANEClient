@@ -1,0 +1,116 @@
+/**
+ * 文件分享 / 打印 / 导出（Android 原生 Intent + FileProvider + MediaStore）
+ * 私有沙盒路径（unifile://）先 convert2AbsFullPath 转真实路径，再 FileProvider 转 content:// Uri
+ */
+import { Intent, ContentValues } from 'android.content'
+import { Uri } from 'android.net'
+import { File, FileInputStream, FileOutputStream, ByteArrayOutputStream } from 'java.io'
+import { Build, Environment } from 'android.os'
+import { MediaStore } from 'android.provider'
+
+/** 把 unifile:// 沙盒路径转成真实绝对路径 */
+function absPathOf(unifilePath: string): string {
+	return UTSAndroid.convert2AbsFullPath(unifilePath)
+}
+
+/** 分享文件（调系统分享面板） */
+export function shareFile(path: string, isPdf: boolean): void {
+	const absPath = absPathOf(path)
+	const file = new File(absPath)
+	if (!file.exists()) {
+		uni.showToast({ title: '文件不存在', icon: 'none' })
+		return
+	}
+	const uri = UTSAndroid.getFileProviderUri(file)
+	const mime: string = isPdf ? 'application/pdf' : 'image/png'
+	const intent = new Intent(Intent.ACTION_SEND)
+	intent.setType(mime)
+	intent.putExtra(Intent.EXTRA_STREAM, uri)
+	intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+	const ctx = UTSAndroid.getUniActivity()
+	if (ctx != null) {
+		ctx.startActivity(Intent.createChooser(intent, '分享文件'))
+	}
+}
+
+/** 打印图片（调系统图片查看器打开，用户在查看器菜单里选"打印"） */
+export function printImage(path: string, name: string): void {
+	const absPath = absPathOf(path)
+	const file = new File(absPath)
+	if (!file.exists()) {
+		uni.showToast({ title: '文件不存在', icon: 'none' })
+		return
+	}
+	const uri = UTSAndroid.getFileProviderUri(file)
+	const intent = new Intent(Intent.ACTION_VIEW)
+	intent.setDataAndType(uri, 'image/png')
+	intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+	const ctx = UTSAndroid.getUniActivity()
+	if (ctx != null) {
+		ctx.startActivity(intent)
+	}
+	uni.showToast({ title: '请在查看器菜单中选"打印"', icon: 'none' })
+}
+
+/** 导出文件到手机公共目录（PNG→Pictures/sane_scans/，PDF→Documents/sane_scans/） */
+export function exportFile(path: string, name: string, isPdf: boolean): void {
+	const absPath = absPathOf(path)
+	const mime: string = isPdf ? 'application/pdf' : 'image/png'
+	// 读私有文件字节
+	const fis = new FileInputStream(absPath)
+	const baos = new ByteArrayOutputStream()
+	const buf = new ByteArray(8192)
+	var n: Int = fis.read(buf)
+	while (n > 0) {
+		baos.write(buf, 0, n)
+		n = fis.read(buf)
+	}
+	fis.close()
+	const bytes: ByteArray = baos.toByteArray()
+	baos.close()
+
+	const context = UTSAndroid.getAppContext()
+	if (context == null) {
+		uni.showToast({ title: '无法获取 Context', icon: 'none' })
+		return
+	}
+
+	if (Build.VERSION.SDK_INT >= 29) {
+		// Android 10+：MediaStore
+		const resolver = context.getContentResolver()
+		const values = new ContentValues()
+		values.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+		values.put(MediaStore.MediaColumns.MIME_TYPE, mime)
+		if (isPdf) {
+			values.put(MediaStore.MediaColumns.RELATIVE_PATH, 'Documents/sane_scans')
+		} else {
+			values.put(MediaStore.MediaColumns.RELATIVE_PATH, 'Pictures/sane_scans')
+		}
+		const collection = isPdf ? MediaStore.Downloads.EXTERNAL_CONTENT_URI
+			: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+		const uri = resolver.insert(collection, values)
+		if (uri == null) {
+			uni.showToast({ title: '导出失败', icon: 'none' })
+			return
+		}
+		const out = resolver.openOutputStream(uri)
+		if (out == null) {
+			uni.showToast({ title: '导出失败', icon: 'none' })
+			return
+		}
+		out.write(bytes)
+		out.close()
+		uni.showToast({ title: '已导出到 ' + (isPdf ? 'Documents/sane_scans' : 'Pictures/sane_scans'), icon: 'none' })
+	} else {
+		// Android 9-：直接写公共目录
+		const baseDir = isPdf
+			? new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), 'sane_scans')
+			: new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), 'sane_scans')
+		baseDir.mkdirs()
+		const outFile = new File(baseDir, name)
+		const fos = new FileOutputStream(outFile)
+		fos.write(bytes)
+		fos.close()
+		uni.showToast({ title: '已导出到 ' + outFile.getAbsolutePath(), icon: 'none' })
+	}
+}

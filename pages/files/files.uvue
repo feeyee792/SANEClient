@@ -2,40 +2,65 @@
 	<view class="page">
 		<view class="header">
 			<text class="header-title">文件管理</text>
-			<text class="header-count">{{files.length}} 个文件</text>
+			<text class="header-count">{{fileCount}} 个文件</text>
 		</view>
 
-		<!-- 文件列表 -->
-		<scroll-view class="file-list" scroll-y="true">
-			<view v-if="files.length == 0" class="empty">
-				<text class="empty-title">还没有扫描文件</text>
-				<text class="empty-sub">去扫描页扫一张试试吧</text>
-			</view>
-			<view v-for="(item, index) in files" :key="item.name" class="file-card" @click="onFileClick(index)">
-				<image v-if="!item.isPdf" class="thumb" :src="item.path" mode="aspectFill"></image>
-				<view v-else class="thumb pdf-thumb">
-					<text class="pdf-text">PDF</text>
-				</view>
-				<view class="file-info">
-					<text class="file-name">{{item.name}}</text>
-					<text class="file-size">{{item.timeText}}</text>
-				</view>
-				<text class="file-tag">{{item.isPdf ? 'PDF' : '图片'}}</text>
-			</view>
-		</scroll-view>
+		<!-- 搜索框 -->
+		<view class="search-bar">
+			<input class="search-input" v-model="keyword" placeholder="搜索文件名…" />
+		</view>
+
+		<!-- 回收长列表（分组头 + 文件项统一高度 90px） -->
+		<uni-recycle-view v-if="flatItems.length > 0" :itemHeight="90" :list="flatItems" style="flex: 1;">
+			<template v-slot:default="{layoutItems, items}">
+				<uni-recycle-item v-for="(item, index) in (items as FlatFileItem[])" :key="(layoutItems as LayoutItem[])[index].id" :offset="(layoutItems as LayoutItem[])[index].offset">
+					<!-- 分组头 -->
+					<view v-if="item.type == 0" class="group-header" @click="onGroupToggle(item)">
+						<view class="group-left">
+							<text class="group-arrow">{{isCollapsed(item.dateKey) ? '▶' : '▼'}}</text>
+							<text class="group-date">{{item.dateText}}</text>
+						</view>
+						<text class="group-count">{{item.count}} 个文件</text>
+					</view>
+					<!-- 文件项 -->
+					<view v-else class="file-card" @click="onFileClick(item)">
+						<image v-if="!item.isPdf" class="thumb" :src="item.filePath" mode="aspectFill"></image>
+						<view v-else class="thumb pdf-thumb">
+							<text class="pdf-text">PDF</text>
+						</view>
+						<view class="file-info">
+							<text class="file-name">{{item.fileName}}</text>
+							<text class="file-size">{{item.fileSizeText}}</text>
+						</view>
+						<text class="file-tag">{{item.isPdf ? 'PDF' : '图片'}}</text>
+					</view>
+				</uni-recycle-item>
+			</template>
+		</uni-recycle-view>
+
+		<!-- 空态 -->
+		<view v-else class="empty">
+			<text class="empty-title">{{keyword == '' ? '还没有扫描文件' : '没有匹配的文件'}}</text>
+			<text class="empty-sub">{{keyword == '' ? '去扫描页扫一张试试吧' : '换个关键词试试'}}</text>
+		</view>
 
 		<!-- 预览弹层 -->
 		<view v-if="showPreview" class="preview-mask" @click="closePreview">
 			<view class="preview-box" @click.stop>
 				<image v-if="!previewItem.isPdf" class="preview-img" :src="previewItem.path" mode="aspectFit" @click="openSystem"></image>
 				<view v-else class="preview-pdf" @click="openSystem">
-					<text class="preview-pdf-text">PDF 文件（共 {{previewItem.name}}）</text>
+					<text class="preview-pdf-text">PDF 文件（{{previewItem.name}}）</text>
 					<text class="preview-pdf-sub">点击调用系统查看器打开</text>
 				</view>
 				<text class="preview-name">{{previewItem.name}}</text>
 				<view class="preview-actions">
 					<button class="preview-btn" @click="openSystem">{{previewItem.isPdf ? '系统打开' : '放大查看'}}</button>
 					<button class="preview-btn" @click="closePreview">关闭</button>
+				</view>
+				<view class="preview-actions">
+					<button class="preview-btn ghost" @click="onShare">分享</button>
+					<button class="preview-btn ghost" @click="onPrint">打印</button>
+					<button class="preview-btn ghost" @click="onExport">导出到手机</button>
 				</view>
 			</view>
 		</view>
@@ -45,23 +70,51 @@
 <script lang="uts">
 	import { store } from '../../common/sane/store'
 	import { ScanFileInfo } from '../../common/sane/fileutil'
+	import { FlatFileItem, buildFlatItems } from '../../common/sane/filegroup'
+	import { shareFile, printImage, exportFile } from '../../common/sane/share'
+	import { LayoutItem } from '@/uni_modules/uni-recycle-view/common/types.uts'
 
 	export default {
 		data() {
 			return {
-				files: [] as Array<ScanFileInfo>,
+				keyword: '',
+				fileCount: 0,
+				collapsed: [] as Array<string>,
+				flatItems: [] as Array<FlatFileItem>,
 				showPreview: false,
 				previewItem: new ScanFileInfo()
 			}
 		},
+		watch: {
+			keyword(): void {
+				this.rebuild()
+			}
+		},
 		onShow() {
 			store.refreshFiles()
-			this.files = store.files
+			this.rebuild()
 		},
 		methods: {
-			onFileClick(index: number): void {
-				if (index >= 0 && index < this.files.length) {
-					this.previewItem = this.files[index]
+			rebuild(): void {
+				this.fileCount = store.files.length
+				this.flatItems = buildFlatItems(store.files, this.keyword, this.collapsed)
+			},
+			isCollapsed(key: string): boolean {
+				return this.collapsed.indexOf(key) >= 0
+			},
+			onGroupToggle(item: FlatFileItem): void {
+				const key: string = item.dateKey
+				const idx: number = this.collapsed.indexOf(key)
+				if (idx >= 0) {
+					this.collapsed.splice(idx, 1)
+				} else {
+					this.collapsed.push(key)
+				}
+				this.rebuild()
+			},
+			onFileClick(item: FlatFileItem): void {
+				if (item.raw != null) {
+					this.previewItem = item.raw
 					this.showPreview = true
 				}
 			},
@@ -91,28 +144,30 @@
 					})
 				}
 			},
-			openSystem(): void {
+			onShare(): void {
+				const p = this.previewItem
+				if (p.path == '') {
+					return
+				}
+				shareFile(p.path, p.isPdf)
+			},
+			onPrint(): void {
 				const p = this.previewItem
 				if (p.path == '') {
 					return
 				}
 				if (p.isPdf) {
-					uni.openDocument({
-						filePath: p.path,
-						fileType: 'pdf',
-						fail: (err: any | null) => {
-							uni.showToast({ title: '系统打开失败', icon: 'none' })
-						}
-					})
-				} else {
-					uni.previewImage({
-						urls: [p.path],
-						current: 0,
-						fail: (err: any | null) => {
-							uni.showToast({ title: '预览失败', icon: 'none' })
-						}
-					})
+					uni.showToast({ title: 'PDF 请先系统打开，再在查看器中打印', icon: 'none' })
+					return
 				}
+				printImage(p.path, p.name)
+			},
+			onExport(): void {
+				const p = this.previewItem
+				if (p.path == '') {
+					return
+				}
+				exportFile(p.path, p.name, p.isPdf)
 			}
 		}
 	}
@@ -145,42 +200,67 @@
 		color: #8A8A8A;
 	}
 
-	.file-list {
-		flex: 1;
-		padding: 0 30rpx;
+	.search-bar {
+		padding: 0 30rpx 20rpx 30rpx;
 	}
 
-	.empty {
+	.search-input {
+		background-color: #FFFFFF;
+		border-radius: 10px;
+		padding: 16rpx 24rpx;
+		font-size: 28rpx;
+		color: #2B2B2B;
+	}
+
+	.group-header {
+		height: 90px;
 		display: flex;
-		flex-direction: column;
+		flex-direction: row;
 		align-items: center;
-		margin-top: 200rpx;
+		justify-content: space-between;
+		padding-left: 30rpx;
+		padding-right: 30rpx;
+		background-color: #F0EEEA;
 	}
 
-	.empty-title {
-		font-size: 32rpx;
+	.group-left {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+	}
+
+	.group-date {
+		font-size: 26rpx;
+		font-weight: bold;
+		color: #0FA3A3;
+	}
+
+	.group-arrow {
+		font-size: 20rpx;
+		color: #0FA3A3;
+		margin-right: 16rpx;
+	}
+
+	.group-count {
+		font-size: 22rpx;
 		color: #8A8A8A;
 	}
 
-	.empty-sub {
-		font-size: 24rpx;
-		color: #BDBDBD;
-		margin-top: 12rpx;
-	}
-
 	.file-card {
+		height: 90px;
 		display: flex;
 		flex-direction: row;
 		align-items: center;
 		background-color: #FFFFFF;
-		border-radius: 12px;
-		padding: 20rpx;
-		margin-bottom: 20rpx;
+		margin-left: 20rpx;
+		margin-right: 20rpx;
+		margin-top: 10rpx;
+		padding: 0 20rpx;
 	}
 
 	.thumb {
-		width: 120rpx;
-		height: 120rpx;
+		width: 90rpx;
+		height: 90rpx;
 		border-radius: 8px;
 		background-color: #F0F0F0;
 	}
@@ -193,7 +273,7 @@
 	}
 
 	.pdf-text {
-		font-size: 26rpx;
+		font-size: 22rpx;
 		font-weight: bold;
 		color: #C0392B;
 	}
@@ -211,18 +291,37 @@
 	}
 
 	.file-size {
-		font-size: 24rpx;
+		font-size: 22rpx;
 		color: #8A8A8A;
 		margin-top: 8rpx;
 	}
 
 	.file-tag {
-		font-size: 22rpx;
+		font-size: 20rpx;
 		color: #0FA3A3;
 		background-color: #E8F5F5;
-		padding: 6rpx 16rpx;
+		padding: 4rpx 14rpx;
 		border-radius: 20rpx;
 		margin-left: 12rpx;
+	}
+
+	.empty {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.empty-title {
+		font-size: 32rpx;
+		color: #8A8A8A;
+	}
+
+	.empty-sub {
+		font-size: 24rpx;
+		color: #BDBDBD;
+		margin-top: 12rpx;
 	}
 
 	.preview-mask {
@@ -293,5 +392,13 @@
 		font-size: 30rpx;
 		border-radius: 10px;
 		border-width: 0;
+	}
+
+	.preview-btn.ghost {
+		background-color: #FFFFFF;
+		color: #0FA3A3;
+		border-width: 1px;
+		border-color: #0FA3A3;
+		font-size: 26rpx;
 	}
 </style>

@@ -1,0 +1,88 @@
+/**
+ * 文件列表分组 + 搜索过滤：
+ * 文件名形如 20260908_155121.png，按前 8 位日期分组；
+ * 输出扁平化数组（分组头 + 文件项交替），供 uni-recycle-view 统一高度渲染。
+ * 字段拍平为非空 string，避开 UTS 模板里嵌套 nullable 的 smart cast 问题。
+ */
+import { ScanFileInfo } from './fileutil'
+
+export class FlatFileItem {
+	type: Int = 0          // 0=分组头，1=文件项
+	// 分组头
+	dateKey: string = ''   // 原始日期 key（20260908），折叠判断用
+	dateText: string = ''  // 2026-09-08
+	count: Int = 0         // 当日文件数
+	// 文件项（拍平自 ScanFileInfo，全部非空）
+	fileName: string = ''
+	filePath: string = ''
+	fileSizeText: string = ''
+	isPdf: boolean = false
+	// 原始引用（点击时用）
+	raw: ScanFileInfo | null = null
+}
+
+function formatDateKey(key: string): string {
+	if (key.length == 8) {
+		return key.substring(0, 4) + '-' + key.substring(4, 6) + '-' + key.substring(6, 8)
+	}
+	return key
+}
+
+/** 把全量文件按关键词过滤后，按日期扁平化为 [头,文件,文件, 头,文件,...]；collapsed 中的分组只输出头 */
+export function buildFlatItems(files: Array<ScanFileInfo>, keyword: string, collapsed: Array<string>): Array<FlatFileItem> {
+	const flat: Array<FlatFileItem> = []
+	const kw: string = keyword.toLowerCase()
+	const filtered: Array<ScanFileInfo> = []
+	for (let i: Int = 0; i < files.length; i++) {
+		const f: ScanFileInfo = files[i]
+		if (kw == '' || f.name.toLowerCase().indexOf(kw) >= 0) {
+			filtered.push(f)
+		}
+	}
+	if (filtered.length == 0) {
+		return flat
+	}
+	// 第一遍：按日期 key 切分连续段
+	const dateKeys: Array<string> = []
+	const groupStart: Array<Int> = []
+	const groupEnd: Array<Int> = []
+	var curKey: string = ''
+	for (let i: Int = 0; i < filtered.length; i++) {
+		const f: ScanFileInfo = filtered[i]
+		const key: string = f.name.length >= 8 ? f.name.substring(0, 8) : 'unknown'
+		if (key != curKey) {
+			dateKeys.push(key)
+			groupStart.push(i)
+			if (dateKeys.length > 1) {
+				groupEnd.push(i)
+			}
+			curKey = key
+		}
+	}
+	groupEnd.push(filtered.length.toInt())
+	// 第二遍：扁平化
+	for (let g: Int = 0; g < dateKeys.length; g++) {
+		const header = new FlatFileItem()
+		header.type = 0
+		header.dateKey = dateKeys[g]
+		header.dateText = formatDateKey(dateKeys[g])
+		header.count = groupEnd[g] - groupStart[g]
+		flat.push(header)
+		// 该分组已折叠则跳过文件项
+		if (collapsed.indexOf(dateKeys[g]) >= 0) {
+			continue
+		}
+		for (let i: Int = groupStart[g]; i < groupEnd[g]; i++) {
+			const f: ScanFileInfo = filtered[i]
+			const item = new FlatFileItem()
+			item.type = 1
+			item.fileName = f.name
+			item.filePath = f.path
+			item.fileSizeText = f.timeText
+			item.isPdf = f.isPdf
+			item.raw = f
+			flat.push(item)
+		}
+	}
+	return flat
+}

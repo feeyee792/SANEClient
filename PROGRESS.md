@@ -1,6 +1,21 @@
-# 开发进度记录（2026-09-08 凌晨）
+# 开发进度记录（2026-09-08）
 
-## 第十五轮：进度条根因 + 采集诊断日志（9-08 下午 15:40）
+## 第十七轮：分享/打印/导出 + 文件页长列表优化（9-08 晚 19:30）
+
+**新增文件 `common/sane/share.uts`**（系统分享/打印/导出，UTSAndroid + Intent + FileProvider + MediaStore）：
+- **分享**：`UTSAndroid.convert2AbsFullPath(unifile路径)` 转真实路径 → `UTSAndroid.getFileProviderUri(file)` 转 content:// Uri → `Intent.ACTION_SEND` + `EXTRA_STREAM` + `FLAG_GRANT_READ_URI_PERMISSION` + `startActivity(createChooser)`
+- **打印**：`androidx.print.PrintHelper` 在 5.24 编译环境不存在，降级为 `ACTION_VIEW` + `image/png` 调系统图片查看器，Toast 提示"在查看器菜单里选打印"；PDF 点打印提示先系统打开
+- **导出**：Android 10+（SDK≥29）走 MediaStore（PNG→Pictures/sane_scans，PDF→Documents/sane_scans）；Android 9- 直接写 `Environment.getExternalStoragePublicDirectory`。manifest 加 `WRITE_EXTERNAL_STORAGE`
+- 坑：UTS import 是**包名**（`import { Intent } from 'android.content'`），类名放花括号，不是 `'android.content.Intent'`
+
+**文件页长列表优化**：
+- 新文件 `common/sane/filegroup.uts`：按文件名前 8 位日期（`20260908`）分组 + 关键词本地过滤，输出扁平 `FlatFileItem` 数组（分组头 + 文件项交替）。字段拍平为非空 string（fileName/filePath/fileSizeText/isPdf），避开 UTS 模板里嵌套 nullable 的 smart cast 坑
+- 引入官方 **uni-recycle-view** 回收长列表组件（复制到 `uni_modules/`），固定 itemHeight=90px，只渲染屏幕可见 item，成千上万文件不卡。分组头和文件项统一高度
+- **分组可折叠**：点分组头 toggle，展开 ▼ / 折叠 ▶，折叠状态存 `collapsed: Array<string>`
+- 顶部搜索框 v-model + watch，边打边过滤文件名
+- 坑：`filtered.length` 是 Number，push 到 Int 数组要 `.toInt()`；template 不能直接用 import 的 store，改成 data 里的 fileCount；slot 断言要 import 组件自带的 `LayoutItem` 类型
+
+## 第十六轮：文件存储改 uni-app x 官方文件系统（9-08 下午 15:49）
 
 **进度条不走的根因（对照 Python 版确认）**：Python `int((transferred / expected_total) * 100)` 是浮点除法；UTS 版 `transferred / expectedTotal` 在 Kotlin 里是**整数除法**，恒为 0 → 进度永远不触发。改 `(transferred * 100 / expectedTotal).toInt()`（6.5M×100 不溢出，语义与 Python 一致）。
 
@@ -188,6 +203,12 @@ HBuilder X 5.07 第二轮编译报错，已全部修复：
    - 设置页连接 → 设备枚举 → 扫描页选项下拉是否按设备生成
    - 扫描一页 PNG → 连续扫描 PDF → 文件页查看
 4. 顺手事项：tabBar 图标（当前纯文字）、扫描结果存相册（MediaStore）、PDF 分享打开
+
+## 路线图（待实现功能，下一版）
+
+~~系统分享 / 系统打印 / 一键导出~~ **已完成（第十七轮）**——见 `common/sane/share.uts` 与文件页预览弹层三个按钮。
+
+下一版可考虑：PDF 多页打印（PrintHelper 只支持 Bitmap，PDF 需 PdfRenderer 逐页渲染）、分组折叠状态持久化。
 
 ## 注意事项
 
